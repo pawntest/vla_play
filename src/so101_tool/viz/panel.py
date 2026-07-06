@@ -13,7 +13,7 @@ import numpy as np
 import viser
 
 from ..config import ARM_JOINTS, ARM_LIMITS_HI, ARM_LIMITS_LO, AppConfig
-from ..control.commands import Home, JogTool, Mode, MoveJ, MoveL, SetGripper, SetMode, Stop
+from ..control.commands import Home, JogTool, Mode, MoveJ, MoveL, SetMode, Stop
 from ..control.loop import ControlLoop, LoopSnapshot
 from ..kinematics import Kinematics
 
