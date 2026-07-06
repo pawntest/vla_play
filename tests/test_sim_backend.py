@@ -32,7 +32,6 @@ def rig():
 
 def test_converges_in_expected_time(rig):
     backend, clock = rig
-    vmax = 2.0  # JointMap default, all joints
     target = np.array([1.0, -0.5, 0.8, 0.3, -1.2])
     backend.write_targets(target, 0.0)
     # Farthest joint is 1.2 rad -> 0.6 s at 2 rad/s. Step at 50 Hz.
