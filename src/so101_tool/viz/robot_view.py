@@ -24,7 +24,7 @@ def _geom_mesh(model: mujoco.MjModel, gid: int) -> trimesh.Trimesh:
     va, vn = model.mesh_vertadr[mid], model.mesh_vertnum[mid]
     fa, fn = model.mesh_faceadr[mid], model.mesh_facenum[mid]
     verts = model.mesh_vert[va : va + vn]
-    faces = model.mesh_face[fa : fa + fn] - va
+    faces = model.mesh_face[fa : fa + fn]  # face indices are local to the mesh
     return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
 
 
@@ -42,6 +42,11 @@ class RobotView:
         self._tcp_sid = model.site(TCP_SITE).id
 
         server.scene.add_grid("/grid", width=1.2, height=1.2, cell_size=0.1)
+
+        @server.on_client_connect
+        def _(client: viser.ClientHandle) -> None:  # sensible default view
+            client.camera.position = (0.65, -0.65, 0.45)
+            client.camera.look_at = (0.2, 0.0, 0.15)
         self._frames: list[tuple[int, viser.FrameHandle]] = []
         body_geoms: dict[int, list[int]] = {}
         for gid in range(model.ngeom):
