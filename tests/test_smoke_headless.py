@@ -49,7 +49,14 @@ def test_full_stack_boots_and_moves():
                 view.sync(last_snap.q, last_snap.gripper)
                 panel.update(last_snap)
         assert mv.ok, mv.error
-        snap = loop.snapshot()
+        # The snapshot can lag the finish by a tick, and the sim keeps
+        # tracking the final target: poll briefly for full convergence.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            snap = loop.snapshot()
+            if snap is not None and np.max(np.abs(snap.q - target)) < 0.03:
+                break
+            time.sleep(0.02)
         assert snap is not None
         assert np.max(np.abs(snap.q - target)) < 0.03
         assert snap.tcp_position[2] > 0  # arm above the floor
