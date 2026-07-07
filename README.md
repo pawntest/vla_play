@@ -1,1 +1,99 @@
-# vla_play
+# so101-tool
+
+Control a [LeRobot SO-101](https://huggingface.co/docs/lerobot/so101) robot arm with a
+**live browser 3D preview**, classic **rule-based motion** (tool-frame jogging, move-to-point
+via IK, joint moves) and **AI control** (lerobot policy inference and natural-language
+commands via the Claude API).
+
+**Sim-first**: everything — the 3D view, IK, motion primitives, natural-language control —
+runs fully in simulation with zero hardware. Connecting a real SO-101 is an add-on backend:
+the same UI then mirrors the physical arm's joints in 3D (input) and sends every command to
+the servos (output).
+
+日本語のクイックスタートは [docs/README.ja.md](docs/README.ja.md) にあります。
+
+## Quickstart (simulation, no hardware)
+
+```bash
+pip install -e ".[dev]"          # Python >= 3.10
+so101-tool run --backend sim
+# open http://localhost:8080
+```
+
+You get a browser 3D scene with the arm and a control panel:
+
+- **Mode** — `idle` / `mirror` (preview only) / `rule` (motion primitives) / `policy`
+- **Joints** — sliders + *Move to sliders*, *Home*, speed control
+- **Cartesian** — drag the target gizmo, *Go to target*; tool-frame jog buttons (±X/±Y/±Z)
+- **EMERGENCY STOP** — latching; no command reaches the robot until reset
+
+Check IK health any time (no hardware): `so101-tool ik-check --n 100`
+
+## Real robot
+
+Requires Python >= 3.12 (lerobot). See [docs/hardware.md](docs/hardware.md) for port
+permissions, calibration and the first-connection safety checklist.
+
+```bash
+pip install -e ".[real]"
+so101-tool run --backend real --port /dev/ttyACM0 --robot-id my_follower
+```
+
+The 3D preview is now synchronized with the physical arm: `mirror` mode shows the real
+joint positions live (hand-pose the arm with torque off to verify the model matches);
+`rule` mode drives the servos through the same safety filter as the sim.
+
+## Natural-language control (Claude)
+
+```bash
+pip install -e ".[nl]"
+export ANTHROPIC_API_KEY=sk-ant-...
+so101-tool run --backend sim        # or real
+```
+
+A *Natural language* box appears in the panel. Try: *"move the gripper 5 cm forward"*,
+*"go to x=250 y=0 z=150"*, *"open the gripper and go home"*. The model only gets the same
+rule-based primitives you have as buttons — every motion passes through the safety filter,
+and steps larger than 25 cm are refused.
+
+## Trained policy inference (ACT / SmolVLA)
+
+```bash
+pip install -e ".[policy]"          # Python >= 3.12, pulls torch
+so101-tool run --backend real --port /dev/ttyACM0 \
+    --policy-path lerobot/smolvla_base --policy-task "pick up the cube"
+```
+
+Switch the mode to `policy` in the panel. Policies need camera observations, so this mode
+requires the real backend (documented limitation of the sim backend).
+
+## Architecture (short version)
+
+| Module | Role |
+| --- | --- |
+| `kinematics.py` | MuJoCo FK + [mink](https://github.com/kevinzakka/mink) differential IK (TCP = `gripperframe` site) |
+| `robot/sim.py`, `robot/lerobot_backend.py` | Interchangeable backends behind `RobotInterface` (radians in, radians out) |
+| `control/loop.py` | 50 Hz thread owning all robot I/O: command queue in, immutable snapshots out, latching e-stop |
+| `control/safety.py` | Joint-limit clamp, velocity limit, floor check on every write |
+| `viz/` | viser 3D scene driven by MuJoCo body poses + GUI panel |
+| `nl/agent.py` | Claude tool-use agent mapping language → motion primitives |
+| `policy/runner.py` | lerobot policy checkpoint → joint targets |
+
+Details in [docs/architecture.md](docs/architecture.md). The arm model is
+[`robotstudio_so101` from mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101)
+(Apache-2.0), vendored under `src/so101_tool/assets/so101/`.
+
+## Safety notes
+
+- Every write to the robot (sim or real) goes through the safety filter: joint limits,
+  velocity clamp, floor keep-out.
+- The **EMERGENCY STOP** button latches: motion commands are refused until *Reset e-stop*.
+- On first real-robot use, follow the sign-check procedure in
+  [docs/hardware.md](docs/hardware.md) before commanding any motion.
+
+## Development
+
+```bash
+.venv/bin/pytest          # no hardware needed
+.venv/bin/ruff check src tests
+```
