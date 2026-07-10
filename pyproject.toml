@@ -17,6 +17,7 @@ dependencies = [
     "trimesh",
     "loop-rate-limiters",
     "tyro",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,8 @@ real = ["lerobot[feetech]>=0.5.1"]
 nl = ["anthropic>=0.40"]
 # Trained policy inference (ACT / SmolVLA)
 policy = ["lerobot[smolvla]>=0.5.1"]
+# Demonstration recording to LeRobotDataset (requires Python >= 3.12)
+data = ["lerobot[dataset]>=0.5.1"]
 dev = ["pytest", "ruff"]
 
 [project.scripts]

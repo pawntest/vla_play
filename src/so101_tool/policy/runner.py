@@ -1,8 +1,8 @@
 """Trained-policy inference (ACT / SmolVLA and other lerobot policies).
 
-Loaded lazily: torch/lerobot are imported on first reset(). Policies need
-camera observations, so this only works with the real backend (LeRobotBackend)
-— the sim backend has no cameras, which is a documented limitation.
+Works with ANY backend that provides camera frames: the physics simulation
+(`--scenario`, rendered MuJoCo cameras) or the real robot (lerobot cameras).
+Loaded lazily: torch/lerobot are imported on first reset().
 
 The control loop calls step(state) each tick and routes the returned targets
 through the safety filter like any other motion source.
@@ -27,10 +27,10 @@ class PolicyRunner:
         self._postprocess = None
 
     def _load(self) -> None:
-        if not self._backend.is_real:
+        if not hasattr(self._backend, "get_camera_frames"):
             raise RuntimeError(
-                "POLICY mode needs camera observations and therefore the real "
-                "backend (--backend real). The sim backend has no cameras."
+                "POLICY mode needs camera observations: run with --scenario "
+                "(physics sim with rendered cameras) or --backend real."
             )
         path = self._config.policy_path
         if not path:
@@ -54,15 +54,20 @@ class PolicyRunner:
             self._load()
         self._policy.reset()
 
+    def _build_observation(self, state: RobotState) -> dict:
+        deg = self._config.joint_map.to_real_deg(state.q)
+        obs = {f"{j}.pos": float(deg[i]) for i, j in enumerate(ARM_JOINTS[:5])}
+        obs["gripper.pos"] = float(np.clip(state.gripper, 0.0, 1.0) * 100.0)
+        obs.update(self._backend.get_camera_frames())
+        return obs
+
     def step(self, state: RobotState) -> tuple[np.ndarray, float] | None:
         """One inference tick -> (q_target rad, gripper fraction), or None to hold."""
         if self._policy is None:
             raise RuntimeError("PolicyRunner.reset() was not called")
-        obs = getattr(self._backend, "last_observation", None)
-        if obs is None:
-            return None
         import torch  # already imported transitively by lerobot
 
+        obs = self._build_observation(state)
         try:
             from lerobot.utils.control_utils import build_inference_frame
 
@@ -80,7 +85,7 @@ class PolicyRunner:
             action = self._policy.select_action(batch)
         action = self._postprocess(action)
         # action: {"<motor>.pos": degrees, "gripper.pos": 0..100}
-        deg = np.array([float(action[f"{j}.pos"]) for j in ARM_JOINTS])
+        deg = np.array([float(action[f"{j}.pos"]) for j in ARM_JOINTS[:5]])
         q = self._config.joint_map.from_real_deg(deg)
         gripper = float(np.clip(float(action["gripper.pos"]) / 100.0, 0.0, 1.0))
         return q, gripper

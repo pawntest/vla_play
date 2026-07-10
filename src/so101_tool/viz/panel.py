@@ -28,14 +28,35 @@ class ControlPanel:
         kinematics: Kinematics,
         config: AppConfig,
         nl_agent=None,
+        recorder=None,  # optional RecorderBridge
+        scenario=None,  # optional Scenario (shows task, enables reset button)
+        backend=None,  # needed for the scenario reset button
     ):
         self._loop = loop
         self._kin = kinematics
         self._config = config
         self._nl_agent = nl_agent
+        self._recorder = recorder
         self._tick = 0
         self._nl_busy = False
         gui = server.gui
+
+        if scenario is not None:
+            with gui.add_folder("Scenario"):
+                gui.add_markdown(f"**{scenario.name}**\n\ntask: *{scenario.task or '-'}*")
+                reset_btn = gui.add_button("Reset scene (randomize)")
+                if backend is not None and hasattr(backend, "reset"):
+                    reset_btn.on_click(lambda _: backend.reset(randomize=True))
+
+        if recorder is not None:
+            with gui.add_folder("Record dataset"):
+                self._rec_status = gui.add_markdown("idle")
+                rec_start = gui.add_button("● Start episode", color="red")
+                rec_save = gui.add_button("■ Stop & save")
+                rec_discard = gui.add_button("✕ Stop & discard")
+                rec_start.on_click(lambda _: recorder.start())
+                rec_save.on_click(lambda _: recorder.stop(save=True))
+                rec_discard.on_click(lambda _: recorder.stop(save=False))
 
         with gui.add_folder("Status"):
             self._mode_dd = gui.add_dropdown("Mode", options=_MODES, initial_value=Mode.IDLE.value)
@@ -154,6 +175,11 @@ class ControlPanel:
         self._tick += 1
         if snap is None or self._tick % 6:  # ~5 Hz text updates at 30 Hz render
             return
+        if self._recorder is not None:
+            marker = "🔴 " if self._recorder.recording else ""
+            self._rec_status.content = (
+                f"{marker}{self._recorder.status} — episodes saved: {self._recorder.episodes}"
+            )
         if self._mode_dd.value != snap.mode.value:
             self._mode_dd.value = snap.mode.value
         joints = " ".join(f"{v:+.2f}" for v in snap.q)

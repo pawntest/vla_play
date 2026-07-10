@@ -93,6 +93,11 @@ class LeRobotBackend(RobotInterface):
         action["gripper.pos"] = float(np.clip(gripper, 0.0, 1.0) * 100.0)
         robot.send_action(action)
 
+    def get_camera_frames(self) -> dict:
+        """Latest camera images from the most recent observation."""
+        obs = self.last_observation or {}
+        return {k: v for k, v in obs.items() if not k.endswith(".pos")}
+
     def set_torque(self, enabled: bool) -> None:
         """Best-effort torque toggle so MIRROR mode can hand-pose the arm."""
         robot = self._require_robot()

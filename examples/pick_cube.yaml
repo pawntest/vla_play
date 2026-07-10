@@ -1,0 +1,18 @@
+# Example scenario: pick up a red cube with pose randomization.
+# Run:  so101-tool run --scenario examples/pick_cube.yaml
+name: pick_cube
+task: "pick up the red cube"
+settle_steps: 200
+objects:
+  - name: cube
+    type: box
+    size: [0.015, 0.015, 0.015]
+    pos: [0.25, 0.0, 0.02]
+    rgba: [0.9, 0.1, 0.1, 1.0]
+    mass: 0.03
+    pos_noise: [0.04, 0.06, 0.0]
+    yaw_range: [-0.6, 0.6]
+cameras:
+  - {name: front, pos: [0.55, -0.35, 0.35], lookat: [0.25, 0.0, 0.05], fovy: 52}
+  - {name: top, pos: [0.25, 0.0, 0.65], lookat: [0.25, 0.0, 0.0], fovy: 55}
+  - {name: wrist_cam}   # built into the arm model

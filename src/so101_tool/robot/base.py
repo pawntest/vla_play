@@ -16,6 +16,9 @@ class RobotState:
     gripper: float  # 0..1
     t: float  # time.monotonic() at read
     connected: bool = True
+    # Full model qpos for scene-aware backends (arm first, then object free
+    # joints); None for arm-only backends.
+    qpos_full: np.ndarray | None = None
 
 
 class RobotInterface(abc.ABC):

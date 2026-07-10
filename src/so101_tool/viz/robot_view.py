@@ -1,9 +1,11 @@
-"""Live 3D view of the arm in viser, driven directly by the MuJoCo model.
+"""Live 3D view of the scene (arm + scenario objects) in viser, driven directly
+by a MuJoCo model.
 
 One viser frame per MuJoCo body that has visual geoms; meshes are built from
-the mjModel mesh arrays (no STL re-reading, no URDF). sync() runs FK on the
-owned Kinematics instance and writes body world transforms into the frame
-handles — viser and MuJoCo share the wxyz quaternion convention.
+the mjModel mesh arrays (no STL re-reading, no URDF), primitive geoms via
+trimesh.creation. sync()/sync_qpos() run FK on an owned MjData and write body
+world transforms into the frame handles — viser and MuJoCo share the wxyz
+quaternion convention.
 """
 
 from __future__ import annotations
@@ -13,19 +15,30 @@ import numpy as np
 import trimesh
 import viser
 
-from ..config import TCP_SITE
+from ..config import TCP_SITE, gripper_fraction_to_rad
 from ..kinematics import Kinematics
 
-_VISUAL_GROUP = 2  # the `visual` default class in the vendored MJCF
+# group 2 = the arm MJCF `visual` class; group 0 = plain geoms (scenario objects)
+_VISIBLE_GROUPS = (0, 2)
 
 
-def _geom_mesh(model: mujoco.MjModel, gid: int) -> trimesh.Trimesh:
-    mid = model.geom_dataid[gid]
-    va, vn = model.mesh_vertadr[mid], model.mesh_vertnum[mid]
-    fa, fn = model.mesh_faceadr[mid], model.mesh_facenum[mid]
-    verts = model.mesh_vert[va : va + vn]
-    faces = model.mesh_face[fa : fa + fn]  # face indices are local to the mesh
-    return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+def _geom_trimesh(model: mujoco.MjModel, gid: int) -> trimesh.Trimesh | None:
+    gtype = model.geom_type[gid]
+    if gtype == mujoco.mjtGeom.mjGEOM_MESH:
+        mid = model.geom_dataid[gid]
+        va, vn = model.mesh_vertadr[mid], model.mesh_vertnum[mid]
+        fa, fn = model.mesh_faceadr[mid], model.mesh_facenum[mid]
+        verts = model.mesh_vert[va : va + vn]
+        faces = model.mesh_face[fa : fa + fn]  # face indices are local to the mesh
+        return trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    size = model.geom_size[gid]
+    if gtype == mujoco.mjtGeom.mjGEOM_BOX:
+        return trimesh.creation.box(extents=2.0 * size)
+    if gtype == mujoco.mjtGeom.mjGEOM_SPHERE:
+        return trimesh.creation.icosphere(subdivisions=2, radius=size[0])
+    if gtype == mujoco.mjtGeom.mjGEOM_CYLINDER:
+        return trimesh.creation.cylinder(radius=size[0], height=2.0 * size[1])
+    return None  # planes etc. — the grid covers the floor
 
 
 def _geom_rgba(model: mujoco.MjModel, gid: int) -> np.ndarray:
@@ -36,9 +49,15 @@ def _geom_rgba(model: mujoco.MjModel, gid: int) -> np.ndarray:
 
 
 class RobotView:
-    def __init__(self, server: viser.ViserServer, kinematics: Kinematics, root: str = "/robot"):
-        self._kin = kinematics
-        model = kinematics.model
+    def __init__(
+        self,
+        server: viser.ViserServer,
+        source: Kinematics | mujoco.MjModel,
+        root: str = "/robot",
+    ):
+        model = source.model if isinstance(source, Kinematics) else source
+        self.model = model
+        self._data = mujoco.MjData(model)
         self._tcp_sid = model.site(TCP_SITE).id
 
         server.scene.add_grid("/grid", width=1.2, height=1.2, cell_size=0.1)
@@ -47,10 +66,13 @@ class RobotView:
         def _(client: viser.ClientHandle) -> None:  # sensible default view
             client.camera.position = (0.65, -0.65, 0.45)
             client.camera.look_at = (0.2, 0.0, 0.15)
+
         self._frames: list[tuple[int, viser.FrameHandle]] = []
         body_geoms: dict[int, list[int]] = {}
         for gid in range(model.ngeom):
-            if model.geom_group[gid] != _VISUAL_GROUP:
+            if model.geom_group[gid] not in _VISIBLE_GROUPS:
+                continue
+            if model.geom_bodyid[gid] == 0:  # world body (floor plane): grid covers it
                 continue
             body_geoms.setdefault(int(model.geom_bodyid[gid]), []).append(gid)
 
@@ -59,9 +81,9 @@ class RobotView:
             frame = server.scene.add_frame(f"{root}/{body_name}", show_axes=False)
             self._frames.append((bid, frame))
             for gid in gids:
-                if model.geom_type[gid] != mujoco.mjtGeom.mjGEOM_MESH:
-                    continue  # the SO-101 visual class is mesh-only
-                mesh = _geom_mesh(model, gid)
+                mesh = _geom_trimesh(model, gid)
+                if mesh is None:
+                    continue
                 rgba = _geom_rgba(model, gid)
                 server.scene.add_mesh_simple(
                     f"{root}/{body_name}/geom{gid}",
@@ -75,12 +97,13 @@ class RobotView:
                 )
 
         self._tcp_frame = server.scene.add_frame("/tcp", axes_length=0.05, axes_radius=0.0025)
-        self.sync(np.zeros(5), 0.0)
+        self.sync_qpos(self._data.qpos)
 
-    def sync(self, q: np.ndarray, gripper: float) -> None:
-        """Update all body transforms (and the TCP axes) from joint values."""
-        self._kin.set_qpos(q, gripper)
-        data = self._kin.data
+    def sync_qpos(self, qpos: np.ndarray) -> None:
+        """Update all body transforms (and the TCP axes) from a full model qpos."""
+        self._data.qpos[:] = qpos
+        mujoco.mj_kinematics(self.model, self._data)
+        data = self._data
         for bid, frame in self._frames:
             frame.position = data.xpos[bid]
             frame.wxyz = data.xquat[bid]
@@ -88,3 +111,10 @@ class RobotView:
         mujoco.mju_mat2Quat(wxyz, data.site_xmat[self._tcp_sid].reshape(-1))
         self._tcp_frame.position = data.site_xpos[self._tcp_sid]
         self._tcp_frame.wxyz = wxyz
+
+    def sync(self, q: np.ndarray, gripper: float) -> None:
+        """Arm-only convenience: joint values -> qpos (model must be the bare arm)."""
+        qpos = self._data.qpos
+        qpos[:5] = q
+        qpos[5] = gripper_fraction_to_rad(gripper)
+        self.sync_qpos(qpos)

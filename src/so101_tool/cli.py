@@ -34,6 +34,19 @@ class RunArgs:
     """Claude model for natural-language control (default: claude-opus-4-8)."""
     no_nl: bool = False
     """Disable natural-language control even if ANTHROPIC_API_KEY is set."""
+    scenario: str | None = None
+    """Scenario YAML (objects/cameras/task): runs the PHYSICS simulation."""
+    record: str | None = None
+    """Record demonstrations to this LeRobotDataset repo_id (adds a GUI panel)."""
+    record_fps: int = 15
+    """Dataset sampling rate."""
+    record_root: str | None = None
+    """Local directory for the dataset (default: HF cache)."""
+    record_resume: bool = False
+    """Append episodes to an existing dataset."""
+    render_width: int = 320
+    render_height: int = 240
+    """Scenario camera resolution (policy obs + recording)."""
 
 
 def _run(args: RunArgs) -> None:
@@ -58,7 +71,20 @@ def _run(args: RunArgs) -> None:
     if args.nl_model:
         config.nl_model = args.nl_model
 
-    if config.backend == "real":
+    scenario = None
+    if args.scenario:
+        from .robot.physics_sim import PhysicsBackend
+        from .scenario import load_scenario
+
+        scenario = load_scenario(args.scenario)
+        robot = PhysicsBackend(
+            scenario,
+            config.joint_map,
+            render_width=args.render_width,
+            render_height=args.render_height,
+        )
+        print(f"scenario: {scenario.name} — task: {scenario.task or '-'}")
+    elif config.backend == "real":
         from .robot.lerobot_backend import LeRobotBackend
 
         robot = LeRobotBackend(config)
@@ -83,7 +109,7 @@ def _run(args: RunArgs) -> None:
 
     server = viser.ViserServer(port=config.viser_port)
     kin_viz = Kinematics()  # render thread owns its own instance
-    view = RobotView(server, kin_viz)
+    view = RobotView(server, robot.model if scenario is not None else kin_viz)
 
     nl_agent = None
     if not args.no_nl and os.environ.get("ANTHROPIC_API_KEY"):
@@ -91,7 +117,35 @@ def _run(args: RunArgs) -> None:
 
         nl_agent = NLAgent(loop, kin_viz, model=config.nl_model)
         print(f"natural-language control enabled ({config.nl_model})")
-    panel = ControlPanel(server, loop, kin_viz, config, nl_agent=nl_agent)
+
+    recorder = None
+    if args.record:
+        if not hasattr(robot, "get_camera_frames"):
+            raise SystemExit("--record needs cameras: use --scenario or --backend real")
+        from .viz.recording import RecorderBridge
+
+        def _make_recorder():
+            from .data.recorder import DatasetRecorder
+
+            frames = robot.get_camera_frames()
+            cameras = {name: img.shape[:2] for name, img in frames.items()}
+            return DatasetRecorder(
+                repo_id=args.record,
+                fps=args.record_fps,
+                cameras=cameras,
+                joint_map=config.joint_map,
+                root=args.record_root,
+                task=scenario.task if scenario else "",
+                resume=args.record_resume,
+            )
+
+        recorder = RecorderBridge(_make_recorder, robot.get_camera_frames, args.record_fps)
+        print(f"recording to dataset: {args.record} (fps {args.record_fps})")
+
+    panel = ControlPanel(
+        server, loop, kin_viz, config,
+        nl_agent=nl_agent, recorder=recorder, scenario=scenario, backend=robot,
+    )
 
     print()
     print(f"  ▶ 3D preview: http://localhost:{config.viser_port}")
@@ -103,16 +157,113 @@ def _run(args: RunArgs) -> None:
         while True:
             snap = loop.snapshot()
             if snap is not None:
-                view.sync(snap.q, snap.gripper)
+                if snap.qpos_full is not None:
+                    view.sync_qpos(snap.qpos_full)
+                else:
+                    view.sync(snap.q, snap.gripper)
                 panel.update(snap)
+                if recorder is not None:
+                    recorder.tick(snap)
             rate.sleep()
     except KeyboardInterrupt:
         print("\nshutting down…")
     finally:
+        if recorder is not None:
+            recorder.finalize()
         loop.stop()
         loop.join(timeout=2.0)
         robot.disconnect()
         server.stop()
+
+
+@dataclasses.dataclass
+class ScriptedDemosArgs:
+    """Auto-generate pick-and-lift demonstrations in the physics sim (no GUI)."""
+
+    scenario: str
+    """Scenario YAML with at least one graspable object."""
+    dataset: str
+    """LeRobotDataset repo_id to record into."""
+    episodes: int = 20
+    object_name: str | None = None
+    """Object to pick (default: first object in the scenario)."""
+    fps: int = 15
+    root: str | None = None
+    """Local dataset directory (default: HF cache)."""
+    resume: bool = False
+    seed: int = 0
+    keep_failures: bool = False
+    """Also save episodes where the object was not lifted."""
+    render_width: int = 320
+    render_height: int = 240
+    max_attempts_factor: int = 3
+    """Stop after episodes*factor attempts even if fewer successes."""
+
+
+def _scripted_demos(args: ScriptedDemosArgs) -> None:
+    from .control.loop import ControlLoop
+    from .data.recorder import DatasetRecorder
+    from .demo.scripted import PickParams, ScriptedPick
+    from .kinematics import Kinematics
+    from .robot.physics_sim import PhysicsBackend
+    from .scenario import load_scenario
+
+    scenario = load_scenario(args.scenario)
+    if not scenario.objects:
+        raise SystemExit("scenario has no objects to pick")
+    object_name = args.object_name or scenario.objects[0].name
+
+    config = AppConfig()
+    backend = PhysicsBackend(
+        scenario, config.joint_map, args.render_width, args.render_height, seed=args.seed
+    )
+    backend.connect()
+    loop = ControlLoop(backend, Kinematics(), config)
+    loop.start()
+    recorder = DatasetRecorder(
+        repo_id=args.dataset,
+        fps=args.fps,
+        cameras={n: (args.render_height, args.render_width) for n in backend.camera_names},
+        joint_map=config.joint_map,
+        root=args.root,
+        task=scenario.task,
+        resume=args.resume,
+    )
+    pick = ScriptedPick(
+        loop, backend, Kinematics(), PickParams(object_name=object_name), sample_hz=args.fps
+    )
+
+    def sample():
+        snap = loop.snapshot()
+        if snap is None:
+            return
+        recorder.add_frame(
+            q=snap.q,
+            gripper=snap.gripper,
+            q_cmd=snap.q_cmd if snap.q_cmd is not None else snap.q,
+            gripper_cmd=snap.gripper_cmd if snap.gripper_cmd is not None else snap.gripper,
+            images=backend.get_camera_frames(),
+        )
+
+    saved = attempts = 0
+    try:
+        while saved < args.episodes and attempts < args.episodes * args.max_attempts_factor:
+            attempts += 1
+            backend.reset(randomize=True)
+            recorder.start_episode()
+            ok = pick.run_episode(sample)
+            keep = ok or args.keep_failures
+            recorder.end_episode(save=keep)
+            saved += keep
+            print(f"episode {attempts}: {'SUCCESS' if ok else 'fail'} — saved {saved}/{args.episodes}")
+    finally:
+        root = recorder.finalize()
+        loop.stop()
+        loop.join(timeout=2.0)
+        backend.disconnect()
+    print(f"\ndataset written: {root} ({saved} episodes)")
+    print(f"train with:  so101-tool train --dataset {args.dataset}"
+          + (f" --dataset-root {root}" if args.root else ""))
 
 
 @dataclasses.dataclass
@@ -156,9 +307,25 @@ def _ik_check(args: IkCheckArgs) -> None:
 
 
 def main() -> None:
-    args = tyro.extras.subcommand_cli_from_dict({"run": RunArgs, "ik-check": IkCheckArgs})
+    from .config import ensure_headless_gl
+
+    ensure_headless_gl()  # before anything imports mujoco
+    from .training import TrainArgs, train_cli
+
+    args = tyro.extras.subcommand_cli_from_dict(
+        {
+            "run": RunArgs,
+            "scripted-demos": ScriptedDemosArgs,
+            "train": TrainArgs,
+            "ik-check": IkCheckArgs,
+        }
+    )
     if isinstance(args, RunArgs):
         _run(args)
+    elif isinstance(args, ScriptedDemosArgs):
+        _scripted_demos(args)
+    elif isinstance(args, TrainArgs):
+        train_cli(args)
     else:
         _ik_check(args)
 

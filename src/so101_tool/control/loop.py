@@ -41,6 +41,10 @@ class LoopSnapshot:
     error: str | None  # last error message, if any
     active_command: str | None  # short description of the running primitive
     backend_is_real: bool
+    # extras for scene view / data recording
+    qpos_full: np.ndarray | None = None  # full model qpos (scene backends)
+    q_cmd: np.ndarray | None = None  # last commanded arm targets (rad)
+    gripper_cmd: float | None = None  # last commanded gripper fraction
 
 
 class _Executor:
@@ -232,6 +236,7 @@ class ControlLoop(threading.Thread):
     def run(self) -> None:
         rate = RateLimiter(frequency=self._config.control_hz, warn=False)
         q_cmd = None
+        g_cmd: float | None = None
         last_t = time.monotonic()
         while self._run.is_set():
             try:
@@ -264,6 +269,7 @@ class ControlLoop(threading.Thread):
                     try:
                         q_t, g_t, done = self._active.step(state, dt)
                         q_cmd = q_t.copy()
+                        g_cmd = g_t
                         if done:
                             self._active.cmd.finish()
                             self._active = None
@@ -276,6 +282,7 @@ class ControlLoop(threading.Thread):
                     if result is not None:
                         q_t, g_t = result
                         q_cmd = np.asarray(q_t, dtype=float).copy()
+                        g_cmd = g_t
                 except Exception as exc:
                     self._error = f"policy failed: {exc}"
                     self._mode = Mode.IDLE
@@ -286,7 +293,7 @@ class ControlLoop(threading.Thread):
                     self._robot.write_targets(q_safe, g_safe)
                 except Exception as exc:
                     self._error = f"robot write failed: {exc}"
-            self._publish(state)
+            self._publish(state, q_cmd, g_cmd)
             rate.sleep()
 
         # shutdown: never leave a producer blocked on wait()
@@ -297,7 +304,7 @@ class ControlLoop(threading.Thread):
             except queue.Empty:
                 break
 
-    def _publish(self, state: RobotState) -> None:
+    def _publish(self, state: RobotState, q_cmd=None, g_cmd=None) -> None:
         tcp = self._kin.fk(state.q, state.gripper)
         self._snap = LoopSnapshot(
             t=state.t,
@@ -310,4 +317,7 @@ class ControlLoop(threading.Thread):
             error=self._error,
             active_command=self._active.describe() if self._active else None,
             backend_is_real=self._robot.is_real,
+            qpos_full=state.qpos_full,
+            q_cmd=None if q_cmd is None else q_cmd.copy(),
+            gripper_cmd=g_cmd,
         )

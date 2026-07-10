@@ -42,6 +42,23 @@ def so101_mjcf_path() -> Path:
     return Path(__file__).parent / "assets" / "so101" / "so101.xml"
 
 
+def ensure_headless_gl() -> None:
+    """Pick a MUJOCO_GL that works without a display.
+
+    MUST run before the first `import mujoco` in the process (mujoco binds its
+    GL platform at import time). OSMesa (pure CPU) is the safe default; EGL is
+    faster but needs a GPU/EGL device — set MUJOCO_GL=egl explicitly for that.
+    """
+    import ctypes.util
+
+    if os.environ.get("MUJOCO_GL") or os.environ.get("DISPLAY"):
+        return
+    if ctypes.util.find_library("OSMesa"):
+        os.environ["MUJOCO_GL"] = "osmesa"
+    elif ctypes.util.find_library("EGL"):
+        os.environ["MUJOCO_GL"] = "egl"
+
+
 def gripper_fraction_to_rad(fraction: float) -> float:
     f = float(np.clip(fraction, 0.0, 1.0))
     return GRIPPER_LIMIT_LO + f * (GRIPPER_LIMIT_HI - GRIPPER_LIMIT_LO)
