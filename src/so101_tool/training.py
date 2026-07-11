@@ -25,7 +25,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-from dataclasses import field
 from pathlib import Path
 
 LEROBOT_TRAIN = "lerobot-train"
@@ -74,7 +73,7 @@ class TrainArgs:
     push_dataset: bool = False
     """Upload the local dataset (--dataset-root or --dataset) to --dataset-hub-repo
     before training / notebook emission."""
-    extra: list[str] = field(default_factory=list)
+    extra: str = ""
     """Raw passthrough arguments appended verbatim to lerobot-train."""
 
 
@@ -152,8 +151,17 @@ def build_train_command(args: TrainArgs) -> list[str]:
             / "train_config.json"
         )
         cmd += ["--resume=true", f"--config_path={config_path}"]
-    cmd += list(args.extra)
+    cmd += shlex.split(args.extra)
     return cmd
+
+
+def _find_train_exe() -> str | None:
+    """Locate lerobot-train: next to this interpreter (venv bin) first — the
+    venv may not be on PATH when so101-tool is invoked directly — then PATH."""
+    sibling = Path(sys.executable).parent / LEROBOT_TRAIN
+    if sibling.exists():
+        return str(sibling)
+    return shutil.which(LEROBOT_TRAIN)
 
 
 def train_local(args: TrainArgs) -> int:
@@ -162,7 +170,7 @@ def train_local(args: TrainArgs) -> int:
     Raises RuntimeError with install instructions if ``lerobot-train`` is not on PATH.
     """
     cmd = build_train_command(args)
-    exe = shutil.which(cmd[0])
+    exe = _find_train_exe()
     if exe is None:
         raise RuntimeError(_MISSING_LEROBOT_MSG)
     print("+ " + shlex.join(cmd), flush=True)

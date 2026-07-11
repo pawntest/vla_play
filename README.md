@@ -67,17 +67,48 @@ so101-tool run --backend real --port /dev/ttyACM0 \
 Switch the mode to `policy` in the panel. Policies need camera observations, so this mode
 requires the real backend (documented limitation of the sim backend).
 
+## Imitation learning: record → train → deploy
+
+The tool covers the full imitation-learning loop, sim-first and with a free-GPU cloud
+option — see [docs/data_and_training.md](docs/data_and_training.md) for the whole story.
+
+```bash
+# 1. describe the scene + task in YAML (objects, cameras, instruction)
+cp examples/pick_cube.yaml my_task.yaml
+
+# 2. record demonstrations as a LeRobotDataset (by hand in the 3D GUI, or scripted)
+so101-tool run --scenario my_task.yaml --record my_task --record-root data/my_task
+so101-tool scripted-demos --scenario my_task.yaml --episodes 50 \
+    --dataset my_task --root data/my_task
+
+# 3. train (wraps lerobot-train; ACT / SmolVLA / Diffusion)
+so101-tool train --dataset data/my_task --policy act          # local GPU box
+so101-tool train --dataset data/my_task --policy act \
+    --push-dataset --dataset-hub-repo you/so101-my-task \
+    --emit-colab train.ipynb                                  # free GPU: open in Colab
+
+# 4. run the trained policy (sim or real)
+so101-tool run --scenario my_task.yaml \
+    --policy-path outputs/train/checkpoints/last/pretrained_model
+```
+
+Datasets and checkpoints are standard LeRobot formats, so anything trained here runs
+anywhere lerobot runs (and vice versa).
+
 ## Architecture (short version)
 
 | Module | Role |
 | --- | --- |
 | `kinematics.py` | MuJoCo FK + [mink](https://github.com/kevinzakka/mink) differential IK (TCP = `gripperframe` site) |
-| `robot/sim.py`, `robot/lerobot_backend.py` | Interchangeable backends behind `RobotInterface` (radians in, radians out) |
+| `scenario.py` | YAML scenes (objects w/ randomization, cameras, task) compiled to one MuJoCo model |
+| `robot/sim.py`, `robot/physics_sim.py`, `robot/lerobot_backend.py` | Interchangeable backends behind `RobotInterface`: kinematic sim, contact-physics sim (rendered cameras), real robot |
 | `control/loop.py` | 50 Hz thread owning all robot I/O: command queue in, immutable snapshots out, latching e-stop |
 | `control/safety.py` | Joint-limit clamp, velocity limit, floor check on every write |
 | `viz/` | viser 3D scene driven by MuJoCo body poses + GUI panel |
 | `nl/agent.py` | Claude tool-use agent mapping language → motion primitives |
-| `policy/runner.py` | lerobot policy checkpoint → joint targets |
+| `policy/runner.py` | lerobot policy checkpoint → joint targets (sim or real cameras) |
+| `data/recorder.py`, `demo/scripted.py` | LeRobotDataset recording; deterministic scripted demo generation |
+| `training.py` | `so101-tool train`: local lerobot-train wrapper + Colab notebook export |
 
 Details in [docs/architecture.md](docs/architecture.md). The arm model is
 [`robotstudio_so101` from mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101)

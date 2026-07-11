@@ -53,7 +53,7 @@ demonstrate the task with the Cartesian gizmo / jog buttons; each episode is sav
 the scenario cameras rendered as video streams:
 
 ```bash
-so101-tool run --scenario examples/pick_cube.yaml --record data/pick_cube
+so101-tool run --scenario examples/pick_cube.yaml --record pick_cube --record-root data/pick_cube
 ```
 
 **In simulation, automatically (scripted demos):** for pick-and-place style tasks the
@@ -62,7 +62,7 @@ poses — useful to bootstrap a dataset in minutes:
 
 ```bash
 so101-tool scripted-demos --scenario examples/pick_cube.yaml \
-    --episodes 50 --out data/pick_cube
+    --episodes 50 --dataset pick_cube --root data/pick_cube
 ```
 
 (Both commands above are part of the recording pipeline currently being finalized in
@@ -107,16 +107,18 @@ don't have a local GPU, use the cloud path below.
 
 ## 4. Train in the cloud (free GPU)
 
-**Step 1 — push your dataset to the Hugging Face hub** (cloud machines can't see your
-disk). Set `HF_TOKEN` to a *write* token first:
+**Google Colab (recommended, free T4 GPU):** one command pushes your local dataset to
+the Hugging Face hub (cloud machines can't see your disk — set `HF_TOKEN` to a *write*
+token first) and emits a ready-to-run notebook:
 
 ```bash
 export HF_TOKEN=hf_...
-so101-tool train --dataset data/pick_cube --push-dataset your-hf-user/so101-pick-cube
+so101-tool train --dataset data/pick_cube --policy act \
+    --push-dataset --dataset-hub-repo your-hf-user/so101-pick-cube \
+    --emit-colab train_pick_cube.ipynb
 ```
 
-**Step 2 — Google Colab (recommended, free T4 GPU):** emit a ready-to-run notebook and
-open it at <https://colab.research.google.com/>:
+Already pushed? Skip the upload and just emit the notebook:
 
 ```bash
 so101-tool train --dataset your-hf-user/so101-pick-cube --policy act \
@@ -163,16 +165,17 @@ control.
 cp examples/pick_cube.yaml my_task.yaml           # edit objects/cameras/task
 
 # 2. demos (sim)
-so101-tool run --scenario my_task.yaml --record data/my_task        # by hand, or:
-so101-tool scripted-demos --scenario my_task.yaml --episodes 50 --out data/my_task
+so101-tool run --scenario my_task.yaml --record my_task --record-root data/my_task   # by hand, or:
+so101-tool scripted-demos --scenario my_task.yaml --episodes 50 \
+    --dataset my_task --root data/my_task
 
 # 3a. train locally (GPU box)
 so101-tool train --dataset data/my_task --policy act
 
 # 3b. ...or in the cloud
 export HF_TOKEN=hf_...
-so101-tool train --dataset data/my_task --push-dataset  you/so101-my-task
-so101-tool train --dataset you/so101-my-task --emit-colab train.ipynb
+so101-tool train --dataset data/my_task \
+    --push-dataset --dataset-hub-repo you/so101-my-task --emit-colab train.ipynb
 #   -> upload train.ipynb to colab.research.google.com, Runtime -> T4 GPU, Run all
 
 # 4. deploy

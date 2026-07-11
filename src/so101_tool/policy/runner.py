@@ -25,6 +25,7 @@ class PolicyRunner:
         self._policy = None
         self._preprocess = None
         self._postprocess = None
+        self._features = None
 
     def _load(self) -> None:
         if not hasattr(self._backend, "get_camera_frames"):
@@ -53,39 +54,52 @@ class PolicyRunner:
         if self._policy is None:
             self._load()
         self._policy.reset()
+        self._preprocess.reset()
+        self._postprocess.reset()
 
     def _build_observation(self, state: RobotState) -> dict:
         deg = self._config.joint_map.to_real_deg(state.q)
-        obs = {f"{j}.pos": float(deg[i]) for i, j in enumerate(ARM_JOINTS[:5])}
+        obs = {f"{j}.pos": float(deg[i]) for i, j in enumerate(ARM_JOINTS)}
         obs["gripper.pos"] = float(np.clip(state.gripper, 0.0, 1.0) * 100.0)
         obs.update(self._backend.get_camera_frames())
         return obs
+
+    def _features_for(self, obs: dict) -> dict:
+        """LeRobot dataset-feature spec matching our observation/action dicts
+        (the same shape the recorder writes, so checkpoints line up)."""
+        from lerobot.utils.feature_utils import hw_to_dataset_features
+
+        hw_obs = {
+            k: (v.shape if isinstance(v, np.ndarray) else float) for k, v in obs.items()
+        }
+        hw_act = {f"{j}.pos": float for j in ARM_JOINTS}
+        hw_act["gripper.pos"] = float
+        feats = hw_to_dataset_features(hw_obs, "observation", use_video=True)
+        feats.update(hw_to_dataset_features(hw_act, "action", use_video=True))
+        return feats
 
     def step(self, state: RobotState) -> tuple[np.ndarray, float] | None:
         """One inference tick -> (q_target rad, gripper fraction), or None to hold."""
         if self._policy is None:
             raise RuntimeError("PolicyRunner.reset() was not called")
         import torch  # already imported transitively by lerobot
+        from lerobot.policies.utils import make_robot_action, prepare_observation_for_inference
+        from lerobot.utils.feature_utils import build_dataset_frame
 
         obs = self._build_observation(state)
-        try:
-            from lerobot.utils.control_utils import build_inference_frame
-
-            frame = build_inference_frame(
-                observation=obs, task=self._config.policy_task, robot_type="so101_follower"
-            )
-        except ImportError:
-            # Older/newer lerobot layouts: fall back to passing the raw
-            # observation dict (+ task) straight into the preprocessor.
-            frame = dict(obs)
-            if self._config.policy_task is not None:
-                frame["task"] = self._config.policy_task
-        batch = self._preprocess(frame)
+        if self._features is None:
+            self._features = self._features_for(obs)
+        frame = build_dataset_frame(self._features, obs, prefix="observation")
         with torch.inference_mode():
-            action = self._policy.select_action(batch)
-        action = self._postprocess(action)
-        # action: {"<motor>.pos": degrees, "gripper.pos": 0..100}
-        deg = np.array([float(action[f"{j}.pos"]) for j in ARM_JOINTS[:5]])
+            observation = prepare_observation_for_inference(
+                frame, torch.device("cpu"), self._config.policy_task, "so101_follower"
+            )
+            observation = self._preprocess(observation)
+            action = self._policy.select_action(observation)
+            action = self._postprocess(action)
+        action_dict = make_robot_action(action.squeeze(0).cpu(), self._features)
+        # action_dict: {"<motor>.pos": degrees, "gripper.pos": 0..100}
+        deg = np.array([float(action_dict[f"{j}.pos"]) for j in ARM_JOINTS])
         q = self._config.joint_map.from_real_deg(deg)
-        gripper = float(np.clip(float(action["gripper.pos"]) / 100.0, 0.0, 1.0))
+        gripper = float(np.clip(float(action_dict["gripper.pos"]) / 100.0, 0.0, 1.0))
         return q, gripper

@@ -1,5 +1,6 @@
 """LeRobotBackend unit tests with a fake SO101Follower (no lerobot install)."""
 
+import importlib.util
 import sys
 import types
 
@@ -88,8 +89,9 @@ def test_radianlike_observation_rejected(fake_lerobot):
 
 
 def test_missing_lerobot_message():
+    if importlib.util.find_spec("lerobot") is not None:
+        pytest.skip("lerobot installed in this env — missing-import path untestable")
     backend = LeRobotBackend(AppConfig(backend="real"))
-    assert "lerobot" not in sys.modules or True  # env has no lerobot either way
     with pytest.raises(RuntimeError, match="so101-tool\\[real\\]"):
         backend.connect()
 

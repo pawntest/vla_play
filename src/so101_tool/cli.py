@@ -201,11 +201,8 @@ class ScriptedDemosArgs:
 
 
 def _scripted_demos(args: ScriptedDemosArgs) -> None:
-    from .control.loop import ControlLoop
     from .data.recorder import DatasetRecorder
-    from .demo.scripted import PickParams, ScriptedPick
-    from .kinematics import Kinematics
-    from .robot.physics_sim import PhysicsBackend
+    from .demo.scripted import PickParams, make_backend_and_pick
     from .scenario import load_scenario
 
     scenario = load_scenario(args.scenario)
@@ -214,12 +211,15 @@ def _scripted_demos(args: ScriptedDemosArgs) -> None:
     object_name = args.object_name or scenario.objects[0].name
 
     config = AppConfig()
-    backend = PhysicsBackend(
-        scenario, config.joint_map, args.render_width, args.render_height, seed=args.seed
+    backend, pick = make_backend_and_pick(
+        scenario,
+        config.joint_map,
+        args.render_width,
+        args.render_height,
+        seed=args.seed,
+        params=PickParams(object_name=object_name),
+        sample_hz=args.fps,
     )
-    backend.connect()
-    loop = ControlLoop(backend, Kinematics(), config)
-    loop.start()
     recorder = DatasetRecorder(
         repo_id=args.dataset,
         fps=args.fps,
@@ -229,19 +229,13 @@ def _scripted_demos(args: ScriptedDemosArgs) -> None:
         task=scenario.task,
         resume=args.resume,
     )
-    pick = ScriptedPick(
-        loop, backend, Kinematics(), PickParams(object_name=object_name), sample_hz=args.fps
-    )
 
-    def sample():
-        snap = loop.snapshot()
-        if snap is None:
-            return
+    def sample(state, q_cmd, gripper_cmd):
         recorder.add_frame(
-            q=snap.q,
-            gripper=snap.gripper,
-            q_cmd=snap.q_cmd if snap.q_cmd is not None else snap.q,
-            gripper_cmd=snap.gripper_cmd if snap.gripper_cmd is not None else snap.gripper,
+            q=state.q,
+            gripper=state.gripper,
+            q_cmd=q_cmd,
+            gripper_cmd=gripper_cmd,
             images=backend.get_camera_frames(),
         )
 
@@ -258,8 +252,6 @@ def _scripted_demos(args: ScriptedDemosArgs) -> None:
             print(f"episode {attempts}: {'SUCCESS' if ok else 'fail'} — saved {saved}/{args.episodes}")
     finally:
         root = recorder.finalize()
-        loop.stop()
-        loop.join(timeout=2.0)
         backend.disconnect()
     print(f"\ndataset written: {root} ({saved} episodes)")
     print(f"train with:  so101-tool train --dataset {args.dataset}"

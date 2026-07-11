@@ -1,25 +1,29 @@
 """Scripted expert for automatic demonstration generation in the physics sim.
 
-Runs a pick-and-lift sequence against a scenario object using the same motion
-primitives a human would trigger from the GUI, sampling frames at a fixed rate
-into a recorder callback. This turns any pick-style scenario into a labelled
-imitation-learning dataset without teleoperation.
+Runs a pick-and-lift sequence SYNCHRONOUSLY on a fake clock: each control tick
+advances simulated time by exactly 1/control_hz regardless of how long camera
+rendering takes, so datasets are deterministic and generation is immune to CPU
+speed (and can run faster than real time). This is intentionally decoupled
+from the interactive ControlLoop, which serves the live GUI on wall-clock time.
 """
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
 
-from ..control.commands import Command, Mode, MoveJ, SetGripper, SetMode
+from ..config import JointMap
+from ..control.safety import SafetyFilter
 from ..kinematics import IKError, Kinematics, SE3Pose
+from ..robot.base import RobotState
 from ..robot.physics_sim import PhysicsBackend
 
-# sample_cb() is called at the recording rate while motions execute
-SampleCallback = Callable[[], None]
+# cb(state, q_cmd, gripper_cmd) — called at the sampling rate in sim time
+SampleCallback = Callable[[RobotState, np.ndarray, float], None]
+
+_GRIPPER_VMAX = 2.0  # fraction/s
 
 
 @dataclass
@@ -28,52 +32,88 @@ class PickParams:
     approach_height: float = 0.07  # m above the object for the pre-grasp pose
     grasp_offset: tuple = (0.0, 0.0, 0.008)  # TCP offset from object center at grasp
     open_fraction: float = 1.0
-    close_fraction: float = 0.0  # jaws stall on the object — timeout counts as grasped
+    close_fraction: float = 0.0
+    close_duration: float = 1.2  # s: jaws stall on the object, so run a fixed time
     lift_height: float = 0.12
     success_lift: float = 0.05  # object must rise this much above its start z
     speed: float = 0.7
-    step_timeout: float = 12.0
+    phase_timeout: float = 8.0  # sim-seconds per motion phase
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
 
 
 class ScriptedPick:
+    """Synchronous scripted pick. The backend MUST be built with clock=<FakeClock>
+    (make_backend_and_pick() wires this up)."""
+
     def __init__(
         self,
-        loop,
         backend: PhysicsBackend,
-        kinematics: Kinematics,
+        clock: FakeClock,
+        kinematics: Kinematics | None = None,
         params: PickParams | None = None,
+        joint_map: JointMap | None = None,
+        control_hz: float = 50.0,
         sample_hz: float = 15.0,
     ):
-        self._loop = loop
         self._backend = backend
-        self._kin = kinematics  # own instance, not the loop's
+        self._clock = clock
+        self._kin = kinematics or Kinematics()
         self.params = params or PickParams()
-        self._sample_dt = 1.0 / sample_hz
+        self._jm = joint_map or backend.joint_map
+        self._safety = SafetyFilter(self._jm)
+        self._dt = 1.0 / control_hz
+        self._ticks_per_sample = max(1, round(control_hz / sample_hz))
 
-    # -- helpers ---------------------------------------------------------------
+    # -- internals -----------------------------------------------------------
 
-    def _run(self, cmd: Command, sample_cb: SampleCallback | None) -> bool:
-        """Execute one primitive, sampling frames while it runs.
+    def _servo_to(
+        self,
+        q_target: np.ndarray,
+        g_target: float | None,
+        q_cmd: np.ndarray,
+        g_cmd: float,
+        duration: float | None,
+        sample_cb: SampleCallback | None,
+        tick_offset: int,
+    ) -> tuple[np.ndarray, float, bool, int]:
+        """Velocity-limited ramp toward (q_target, g_target) in sim time.
 
-        Returns True if the command completed cleanly, False on error/timeout.
+        Runs until settled (or `duration` sim-seconds when given). Returns
+        (q_cmd, g_cmd, settled, tick_offset).
         """
-        self._loop.commands.put(cmd)
-        deadline = time.monotonic() + self.params.step_timeout
-        next_sample = 0.0
-        while not cmd.wait(0.01):
-            now = time.monotonic()
-            if now >= next_sample and sample_cb is not None:
-                sample_cb()
-                next_sample = now + self._sample_dt
-            if now > deadline:
-                return False
-        return cmd.ok
+        p = self.params
+        max_ticks = int((duration if duration is not None else p.phase_timeout) / self._dt)
+        vmax = self._jm.vmax_rad_s
+        state = None
+        for _ in range(max_ticks):
+            self._clock.t += self._dt
+            step = vmax * p.speed * self._dt
+            q_cmd = q_cmd + np.clip(q_target - q_cmd, -step, step)
+            if g_target is not None:
+                dg = np.clip(g_target - g_cmd, -_GRIPPER_VMAX * self._dt, _GRIPPER_VMAX * self._dt)
+                g_cmd = float(g_cmd + dg)
+            prev = self._backend.read_state()
+            q_safe, g_safe = self._safety.filter(q_cmd, g_cmd, prev, self._dt)
+            self._backend.write_targets(q_safe, g_safe)
+            state = self._backend.read_state()
+            tick_offset += 1
+            if sample_cb is not None and tick_offset % self._ticks_per_sample == 0:
+                sample_cb(state, q_cmd.copy(), g_cmd)
+            if duration is None and np.max(np.abs(state.q - q_target)) < 0.02 and (
+                g_target is None or abs(state.gripper - g_target) < 0.05
+            ):
+                return q_cmd, g_cmd, True, tick_offset
+        return q_cmd, g_cmd, duration is not None, tick_offset
 
-    def _ik_movej(self, position: np.ndarray, gripper: float | None) -> MoveJ:
-        snap = self._loop.snapshot()
-        seed = snap.q if snap is not None else np.zeros(5)
-        q = self._kin.ik(SE3Pose(position=position, wxyz=None), seed)
-        return MoveJ(q=q, gripper=gripper, speed=self.params.speed)
+    def _ik(self, position: np.ndarray, seed: np.ndarray) -> np.ndarray:
+        return self._kin.ik(SE3Pose(position=position, wxyz=None), seed)
 
     # -- public API --------------------------------------------------------------
 
@@ -85,28 +125,54 @@ class ScriptedPick:
         grasp = obj_pos + np.asarray(p.grasp_offset)
         above = grasp + [0.0, 0.0, p.approach_height]
 
-        mode = SetMode(mode=Mode.RULE)
-        self._loop.commands.put(mode)
-        if not (mode.wait(5.0) and mode.ok):
-            return False
+        state = self._backend.read_state()
+        q_cmd, g_cmd = state.q.copy(), state.gripper
         try:
-            steps = [
-                self._ik_movej(above, p.open_fraction),
-                self._ik_movej(grasp, None),
-            ]
+            q_above = self._ik(above, q_cmd)
+            q_grasp = self._ik(grasp, q_above)
+            q_lift = self._ik(grasp + [0.0, 0.0, p.lift_height], q_grasp)
         except IKError:
             return False
-        for cmd in steps:
-            if not self._run(cmd, sample_cb):
-                return False
-        # Close on the object: the jaws stall against it, so a timeout here
-        # usually MEANS a firm grasp. Treat both outcomes as "try lifting".
-        self._run(SetGripper(fraction=p.close_fraction), sample_cb)
-        try:
-            lift = self._ik_movej(grasp + [0.0, 0.0, p.lift_height], None)
-        except IKError:
+
+        ticks = 0
+        q_cmd, g_cmd, ok, ticks = self._servo_to(
+            q_above, p.open_fraction, q_cmd, g_cmd, None, sample_cb, ticks
+        )
+        if not ok:
             return False
-        if not self._run(lift, sample_cb):
+        q_cmd, g_cmd, ok, ticks = self._servo_to(q_grasp, None, q_cmd, g_cmd, None, sample_cb, ticks)
+        if not ok:
+            return False
+        # Close on the object for a fixed time: the jaws stall against it,
+        # which IS the grasp — a settle check would never pass.
+        q_cmd, g_cmd, _, ticks = self._servo_to(
+            q_cmd.copy(), p.close_fraction, q_cmd, g_cmd, p.close_duration, sample_cb, ticks
+        )
+        q_cmd, g_cmd, ok, ticks = self._servo_to(q_lift, None, q_cmd, g_cmd, None, sample_cb, ticks)
+        if not ok:
             return False
         end_z = self._backend.object_pose(p.object_name)[0][2]
         return bool(end_z - start_z > p.success_lift)
+
+
+def make_backend_and_pick(
+    scenario,
+    joint_map: JointMap | None = None,
+    render_width: int = 320,
+    render_height: int = 240,
+    seed: int = 0,
+    params: PickParams | None = None,
+    control_hz: float = 50.0,
+    sample_hz: float = 15.0,
+) -> tuple[PhysicsBackend, ScriptedPick]:
+    """Build a fake-clocked PhysicsBackend + ScriptedPick pair for data generation."""
+    clock = FakeClock()
+    backend = PhysicsBackend(
+        scenario, joint_map, render_width, render_height, seed=seed, clock=clock
+    )
+    backend.connect()
+    pick = ScriptedPick(
+        backend, clock, params=params, joint_map=joint_map,
+        control_hz=control_hz, sample_hz=sample_hz,
+    )
+    return backend, pick

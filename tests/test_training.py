@@ -58,9 +58,9 @@ class TestBuildTrainCommand:
         assert "--output_dir=out/x" in cmd
 
     def test_extra_passthrough_appended_verbatim(self):
-        extra = ["--save_freq=1000", "--wandb.enable=true"]
+        extra = "--save_freq=1000 --wandb.enable=true"
         cmd = build_train_command(_args(device="cpu", extra=extra))
-        assert cmd[-2:] == extra
+        assert cmd[-2:] == ["--save_freq=1000", "--wandb.enable=true"]
 
     def test_push_to_hub_requires_hub_repo(self):
         with pytest.raises(ValueError, match="hub_repo"):
@@ -128,7 +128,7 @@ class TestTrainLocal:
     def test_friendly_error_when_lerobot_train_missing(self, monkeypatch):
         import so101_tool.training as training
 
-        monkeypatch.setattr(training.shutil, "which", lambda _: None)
+        monkeypatch.setattr(training, "_find_train_exe", lambda: None)
         with pytest.raises(RuntimeError) as exc:
             train_local(_args(device="cpu"))
         msg = str(exc.value)
@@ -147,7 +147,7 @@ class TestTrainLocal:
             seen["argv"] = argv
             return FakeCompleted()
 
-        monkeypatch.setattr(training.shutil, "which", lambda _: "/fake/bin/lerobot-train")
+        monkeypatch.setattr(training, "_find_train_exe", lambda: "/fake/bin/lerobot-train")
         monkeypatch.setattr(training.subprocess, "run", fake_run)
         assert train_local(_args(device="cpu")) == 7
         assert seen["argv"][0] == "/fake/bin/lerobot-train"
@@ -265,6 +265,6 @@ class TestTrainCli:
     def test_missing_lerobot_is_clean_systemexit(self, monkeypatch):
         import so101_tool.training as training
 
-        monkeypatch.setattr(training.shutil, "which", lambda _: None)
+        monkeypatch.setattr(training, "_find_train_exe", lambda: None)
         with pytest.raises(SystemExit, match=r"so101-tool\[policy\]"):
             train_cli(_args(device="cpu"))

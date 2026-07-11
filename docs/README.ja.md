@@ -69,6 +69,35 @@ so101-tool run --backend real --port /dev/ttyACM0 \
 パネルで Mode を `policy` に切り替えると推論が始まります。ポリシーはカメラ画像を
 必要とするため、実機バックエンド専用です(シムバックエンドの既知の制限)。
 
+## 模倣学習: データ収集 → 学習 → 実行
+
+シーン定義からデモ収集・学習・実行まで、模倣学習の一連の流れをこのツールだけで
+完結できます。詳しい手順は [data_and_training.md](data_and_training.md)(英語)を
+参照してください。
+
+```bash
+# 1. シーンとタスクを YAML で定義(オブジェクト・カメラ・指示文)
+cp examples/pick_cube.yaml my_task.yaml
+
+# 2. デモを LeRobotDataset 形式で収集(3D GUI で手動、またはスクリプト自動生成)
+so101-tool run --scenario my_task.yaml --record my_task --record-root data/my_task
+so101-tool scripted-demos --scenario my_task.yaml --episodes 50 \
+    --dataset my_task --root data/my_task
+
+# 3. 学習(lerobot-train のラッパー。ACT / SmolVLA / Diffusion に対応)
+so101-tool train --dataset data/my_task --policy act          # ローカル GPU がある場合
+so101-tool train --dataset data/my_task --policy act \
+    --push-dataset --dataset-hub-repo you/so101-my-task \
+    --emit-colab train.ipynb    # GPU がない場合: 生成された notebook を Colab で実行(無料 GPU)
+
+# 4. 学習済みポリシーを実行(シム・実機どちらでも)
+so101-tool run --scenario my_task.yaml \
+    --policy-path outputs/train/checkpoints/last/pretrained_model
+```
+
+データセットもチェックポイントも標準の LeRobot 形式なので、ここで学習したモデルは
+lerobot が動く環境ならどこでも(逆も同様に)利用できます。
+
 ## 詳細
 
 - モジュール構成とスレッドモデル: [architecture.md](architecture.md)
