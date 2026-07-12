@@ -162,6 +162,10 @@ class ControlLoop(threading.Thread):
     def snapshot(self) -> LoopSnapshot | None:
         return self._snap
 
+    def set_policy_runner(self, runner) -> None:
+        """Swap the policy runner at runtime (GIL-atomic reference assignment)."""
+        self._policy = runner
+
     def estop(self) -> None:
         """Latching emergency stop (takes effect within one tick)."""
         self._estop.set()

@@ -17,12 +17,18 @@ so101-tool run --backend sim
 # ブラウザで http://localhost:8080 を開く
 ```
 
-ブラウザにアームの3Dシーンと操作パネルが表示されます:
+ブラウザにアームの3Dシーンと操作パネルが表示されます。**このツールの全機能をUIだけで
+操作できます**(追加のターミナル不要):
 
+- **Scenario** — シーンYAMLの読み込み・物体配置のランダマイズ・物体の対話的な追加/削除
+  (種類・サイズ・位置・色・質量・ランダマイズ幅)・YAMLへの保存
 - **Mode** — `idle` / `mirror`(プレビューのみ)/ `rule`(動作プリミティブ)/ `policy`
-- **Joints** — 関節スライダー +「Move to sliders」「Home」、速度スライダー
-- **Cartesian** — ターゲットギズモをドラッグして「Go to target」。ツール座標系の
-  ジョグボタン(±X/±Y/±Z、ステップ幅指定)
+- **Joints / Cartesian** — 関節スライダー、Home、ターゲットギズモ、ツール座標系ジョグ
+- **Record dataset** — アームを操作しながら LeRobotDataset エピソードを開始/保存/破棄
+- **Scripted demos** — ピックのデモを自動生成して同じデータセットに追加
+- **Policy (AI)** — チェックポイント(ローカルパス/Hub ID)をロードしてその場で実行
+- **Train** — lerobot-train の起動/停止(ログをストリーム表示)、Colabノートブック出力
+- **Natural language** — 自然言語コマンド欄(ANTHROPIC_API_KEY 設定時)
 - **EMERGENCY STOP** — ラッチ式非常停止。「Reset e-stop」を押すまで一切の動作を拒否
 
 IKの健全性チェック(実機不要): `so101-tool ik-check --n 100`
@@ -72,8 +78,9 @@ so101-tool run --backend real --port /dev/ttyACM0 \
 ## 模倣学習: データ収集 → 学習 → 実行
 
 シーン定義からデモ収集・学習・実行まで、模倣学習の一連の流れをこのツールだけで
-完結できます。詳しい手順は [data_and_training.md](data_and_training.md)(英語)を
-参照してください。
+完結できます。以下の全ステップは**ブラウザUIのパネル(Scenario → Record/Scripted
+demos → Train → Policy)だけでも実行可能**です。CLI での同等操作は次のとおり。
+詳しい手順は [data_and_training.md](data_and_training.md)(英語)を参照してください。
 
 ```bash
 # 1. シーンとタスクを YAML で定義(オブジェクト・カメラ・指示文)

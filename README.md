@@ -20,11 +20,18 @@ so101-tool run --backend sim
 # open http://localhost:8080
 ```
 
-You get a browser 3D scene with the arm and a control panel:
+You get a browser 3D scene with the arm and a control panel. **Everything the tool can
+do is available from this UI** — no extra terminals needed:
 
+- **Scenario** — load a scene YAML, randomize object poses, add/remove objects
+  interactively (type, size, position, color, mass, randomization) and save back to YAML
 - **Mode** — `idle` / `mirror` (preview only) / `rule` (motion primitives) / `policy`
-- **Joints** — sliders + *Move to sliders*, *Home*, speed control
-- **Cartesian** — drag the target gizmo, *Go to target*; tool-frame jog buttons (±X/±Y/±Z)
+- **Joints / Cartesian** — sliders, *Home*, target gizmo + *Go to target*, tool-frame jogs
+- **Record dataset** — start/save/discard LeRobotDataset episodes while you drive the arm
+- **Scripted demos** — auto-generate pick demonstrations into the same dataset
+- **Policy (AI)** — load a checkpoint (local path or hub id) and run it live
+- **Train** — launch/stop lerobot-train with streamed logs, or export a Colab notebook
+- **Natural language** — chat box (with ANTHROPIC_API_KEY)
 - **EMERGENCY STOP** — latching; no command reaches the robot until reset
 
 Check IK health any time (no hardware): `so101-tool ik-check --n 100`
@@ -71,6 +78,8 @@ requires the real backend (documented limitation of the sim backend).
 
 The tool covers the full imitation-learning loop, sim-first and with a free-GPU cloud
 option — see [docs/data_and_training.md](docs/data_and_training.md) for the whole story.
+The entire loop below can also be driven from the browser UI (Scenario → Record/Scripted
+demos → Train → Policy folders); the CLI equivalents are:
 
 ```bash
 # 1. describe the scene + task in YAML (objects, cameras, instruction)

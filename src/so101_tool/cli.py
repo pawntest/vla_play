@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import os
 import time
 
 import numpy as np
@@ -51,12 +50,8 @@ class RunArgs:
 
 def _run(args: RunArgs) -> None:
     import viser
-    from loop_rate_limiters import RateLimiter
 
-    from .control.loop import ControlLoop
-    from .kinematics import Kinematics
-    from .viz.panel import ControlPanel
-    from .viz.robot_view import RobotView
+    from .app import App, run_app
 
     config = AppConfig(
         backend=args.backend,
@@ -67,113 +62,27 @@ def _run(args: RunArgs) -> None:
         render_hz=args.render_hz,
         policy_path=args.policy_path,
         policy_task=args.policy_task,
+        render_width=args.render_width,
+        render_height=args.render_height,
+        no_nl=args.no_nl,
     )
     if args.nl_model:
         config.nl_model = args.nl_model
 
-    scenario = None
-    if args.scenario:
-        from .robot.physics_sim import PhysicsBackend
-        from .scenario import load_scenario
-
-        scenario = load_scenario(args.scenario)
-        robot = PhysicsBackend(
-            scenario,
-            config.joint_map,
-            render_width=args.render_width,
-            render_height=args.render_height,
-        )
-        print(f"scenario: {scenario.name} — task: {scenario.task or '-'}")
-    elif config.backend == "real":
-        from .robot.lerobot_backend import LeRobotBackend
-
-        robot = LeRobotBackend(config)
-    elif config.backend == "sim":
-        from .robot.sim import SimBackend
-
-        robot = SimBackend(config.joint_map)
-    else:
-        raise SystemExit(f"unknown backend {config.backend!r} (use 'sim' or 'real')")
-
-    print(f"connecting to {config.backend} robot…")
-    robot.connect()
-
-    policy_runner = None
-    if config.policy_path:
-        from .policy.runner import PolicyRunner
-
-        policy_runner = PolicyRunner(config, robot)
-
-    loop = ControlLoop(robot, Kinematics(), config, policy_runner=policy_runner)
-    loop.start()
-
     server = viser.ViserServer(port=config.viser_port)
-    kin_viz = Kinematics()  # render thread owns its own instance
-    view = RobotView(server, robot.model if scenario is not None else kin_viz)
-
-    nl_agent = None
-    if not args.no_nl and os.environ.get("ANTHROPIC_API_KEY"):
-        from .nl.agent import NLAgent
-
-        nl_agent = NLAgent(loop, kin_viz, model=config.nl_model)
-        print(f"natural-language control enabled ({config.nl_model})")
-
-    recorder = None
-    if args.record:
-        if not hasattr(robot, "get_camera_frames"):
-            raise SystemExit("--record needs cameras: use --scenario or --backend real")
-        from .viz.recording import RecorderBridge
-
-        def _make_recorder():
-            from .data.recorder import DatasetRecorder
-
-            frames = robot.get_camera_frames()
-            cameras = {name: img.shape[:2] for name, img in frames.items()}
-            return DatasetRecorder(
-                repo_id=args.record,
-                fps=args.record_fps,
-                cameras=cameras,
-                joint_map=config.joint_map,
-                root=args.record_root,
-                task=scenario.task if scenario else "",
-                resume=args.record_resume,
-            )
-
-        recorder = RecorderBridge(_make_recorder, robot.get_camera_frames, args.record_fps)
-        print(f"recording to dataset: {args.record} (fps {args.record_fps})")
-
-    panel = ControlPanel(
-        server, loop, kin_viz, config,
-        nl_agent=nl_agent, recorder=recorder, scenario=scenario, backend=robot,
+    app = App(
+        server,
+        config,
+        scenario_path=args.scenario,
+        record_repo=args.record,
+        record_root=args.record_root,
+        record_fps=args.record_fps,
     )
-
     print()
     print(f"  ▶ 3D preview: http://localhost:{config.viser_port}")
     print("    Ctrl-C to exit.")
     print()
-
-    rate = RateLimiter(frequency=config.render_hz, warn=False)
-    try:
-        while True:
-            snap = loop.snapshot()
-            if snap is not None:
-                if snap.qpos_full is not None:
-                    view.sync_qpos(snap.qpos_full)
-                else:
-                    view.sync(snap.q, snap.gripper)
-                panel.update(snap)
-                if recorder is not None:
-                    recorder.tick(snap)
-            rate.sleep()
-    except KeyboardInterrupt:
-        print("\nshutting down…")
-    finally:
-        if recorder is not None:
-            recorder.finalize()
-        loop.stop()
-        loop.join(timeout=2.0)
-        robot.disconnect()
-        server.stop()
+    run_app(app, config.render_hz)
 
 
 @dataclasses.dataclass

@@ -30,6 +30,7 @@ followed by one free joint per non-static object.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -97,6 +98,26 @@ def load_scenario(path: str | Path) -> Scenario:
         settle_steps=int(raw.get("settle_steps", 100)),
         source_path=str(path),
     )
+
+
+def save_scenario(scenario: Scenario, path: str | Path) -> Path:
+    """Write a scenario back to YAML (inverse of load_scenario)."""
+    import yaml
+
+    def clean(d: dict) -> dict:
+        return {k: v for k, v in d.items() if v is not None and k != "source_path"}
+
+    raw = {
+        "name": scenario.name,
+        "task": scenario.task,
+        "settle_steps": scenario.settle_steps,
+        "objects": [clean(dataclasses.asdict(o)) for o in scenario.objects],
+        "cameras": [clean(dataclasses.asdict(c)) for c in scenario.cameras],
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False, allow_unicode=True))
+    return path
 
 
 def _camera_quat(pos: np.ndarray, lookat: np.ndarray) -> np.ndarray:

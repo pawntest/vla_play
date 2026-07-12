@@ -60,7 +60,8 @@ class RobotView:
         self._data = mujoco.MjData(model)
         self._tcp_sid = model.site(TCP_SITE).id
 
-        server.scene.add_grid("/grid", width=1.2, height=1.2, cell_size=0.1)
+        self._handles = []
+        self._handles.append(server.scene.add_grid("/grid", width=1.2, height=1.2, cell_size=0.1))
 
         @server.on_client_connect
         def _(client: viser.ClientHandle) -> None:  # sensible default view
@@ -80,12 +81,13 @@ class RobotView:
             body_name = model.body(bid).name or f"body{bid}"
             frame = server.scene.add_frame(f"{root}/{body_name}", show_axes=False)
             self._frames.append((bid, frame))
+            self._handles.append(frame)
             for gid in gids:
                 mesh = _geom_trimesh(model, gid)
                 if mesh is None:
                     continue
                 rgba = _geom_rgba(model, gid)
-                server.scene.add_mesh_simple(
+                self._handles.append(server.scene.add_mesh_simple(
                     f"{root}/{body_name}/geom{gid}",
                     vertices=mesh.vertices.astype(np.float32),
                     faces=mesh.faces.astype(np.uint32),
@@ -94,10 +96,21 @@ class RobotView:
                     flat_shading=False,
                     position=model.geom_pos[gid],
                     wxyz=model.geom_quat[gid],
-                )
+                ))
 
         self._tcp_frame = server.scene.add_frame("/tcp", axes_length=0.05, axes_radius=0.0025)
+        self._handles.append(self._tcp_frame)
         self.sync_qpos(self._data.qpos)
+
+    def remove(self) -> None:
+        """Remove every scene node this view created (App scene rebuild)."""
+        for h in self._handles:
+            try:
+                h.remove()
+            except Exception:
+                pass
+        self._handles.clear()
+        self._frames.clear()
 
     def sync_qpos(self, qpos: np.ndarray) -> None:
         """Update all body transforms (and the TCP axes) from a full model qpos."""

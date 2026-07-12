@@ -107,6 +107,10 @@ class AppConfig:
     # Optional lerobot policy checkpoint (POLICY mode)
     policy_path: str | None = None
     policy_task: str | None = None  # task instruction for VLA policies
+    # scenario camera render resolution (policy obs + dataset recording)
+    render_width: int = 320
+    render_height: int = 240
+    no_nl: bool = False  # disable the Claude NL agent even if an API key is set
     # lerobot camera configs passed through to SO101FollowerConfig, e.g.
     # {"front": {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30}}
     cameras: dict = field(default_factory=dict)
