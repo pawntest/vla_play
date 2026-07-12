@@ -69,6 +69,10 @@ class RobotView:
             client.camera.look_at = (0.2, 0.0, 0.15)
 
         self._frames: list[tuple[int, viser.FrameHandle]] = []
+        # (body_name, mesh_handle) for every rigid geom mesh — arm bodies and
+        # obj_* scenario bodies. Consumed by DirectDrag to bind on_drag per node.
+        # Cloth flex meshes live under /cloth/ and are intentionally NOT here.
+        self.mesh_nodes: list[tuple[str, viser.MeshHandle]] = []
         body_geoms: dict[int, list[int]] = {}
         for gid in range(model.ngeom):
             if model.geom_group[gid] not in _VISIBLE_GROUPS:
@@ -87,7 +91,7 @@ class RobotView:
                 if mesh is None:
                     continue
                 rgba = _geom_rgba(model, gid)
-                self._handles.append(server.scene.add_mesh_simple(
+                handle = server.scene.add_mesh_simple(
                     f"{root}/{body_name}/geom{gid}",
                     vertices=mesh.vertices.astype(np.float32),
                     faces=mesh.faces.astype(np.uint32),
@@ -96,7 +100,9 @@ class RobotView:
                     flat_shading=False,
                     position=model.geom_pos[gid],
                     wxyz=model.geom_quat[gid],
-                ))
+                )
+                self._handles.append(handle)
+                self.mesh_nodes.append((body_name, handle))
 
         self._tcp_frame = server.scene.add_frame("/tcp", axes_length=0.05, axes_radius=0.0025)
         self._handles.append(self._tcp_frame)

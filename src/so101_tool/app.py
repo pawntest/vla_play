@@ -24,6 +24,7 @@ from .config import AppConfig
 from .control.commands import Mode, SetMode
 from .kinematics import Kinematics
 from .scenario import Scenario
+from .viz.direct_drag import install_direct_drag
 from .viz.recording import RecorderBridge
 from .viz.robot_view import RobotView
 
@@ -42,6 +43,7 @@ class App:
         self.session: Session | None = None
         self.view: RobotView | None = None
         self.panel = None
+        self.direct_drag = None
         self.recorder: RecorderBridge | None = None
         self.nl_agent = None
 
@@ -83,6 +85,7 @@ class App:
         app.session = None
         app.view = None
         app.panel = None
+        app.direct_drag = None
         app.recorder = None
         app.nl_agent = None
         app.scene_status = ""
@@ -112,6 +115,7 @@ class App:
             self._maybe_nl_agent()
             self.recorder = None
             self.panel = ControlPanel(self.server, self)
+            self.direct_drag = install_direct_drag(self)
         name = session.scenario.name if session.scenario else "bare arm"
         self.scene_status = f"scene: {name}"
 

@@ -187,6 +187,9 @@ class ControlPanel:
 
         # ---- Cartesian ---------------------------------------------------------------
         with gui.add_folder("Cartesian (RULE)", expand_by_default=False):
+            self._direct_drag_cb = gui.add_checkbox("🖐 Direct drag (grab meshes)",
+                                                    initial_value=True)
+            self._direct_drag_cb.on_update(lambda _: self._set_direct_drag())
             self._gizmo = server.scene.add_transform_controls("/target", scale=0.15)
             snap_btn = gui.add_button("Snap target to TCP")
             go_pos_btn = gui.add_button("Go to target (position)")
@@ -333,6 +336,10 @@ class ControlPanel:
 
     def _put(self, cmd) -> None:
         self._loop.commands.put(cmd)
+
+    def _set_direct_drag(self) -> None:
+        if self._app.direct_drag is not None:
+            self._app.direct_drag.enabled = self._direct_drag_cb.value
 
     def _snap_gizmo_to_tcp(self) -> None:
         snap = self._loop.snapshot()
