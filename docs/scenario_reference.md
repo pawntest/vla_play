@@ -1,5 +1,7 @@
 # Scenario YAML reference
 
+日本語版: [docs/ja/scenario_reference.md](ja/scenario_reference.md)
+
 **日本語**: シーン(環境・物体・カメラ・タスク)を定義するYAMLの完全リファレンスです。
 座標系はアーム基部が原点、+X前方、+Z上、単位はメートル/ラジアン。GUIの
 Scenario→Edit objects/Cameras/Environment パネルは同じスキーマを対話的に編集し、

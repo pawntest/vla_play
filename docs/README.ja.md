@@ -129,3 +129,13 @@ api.train(dataset="data/pick", policy="act")
 - アームの3Dモデルは mujoco_menagerie の
   [`robotstudio_so101`](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101)
   (Apache-2.0)を `src/so101_tool/assets/so101/` に同梱しています。
+
+## リファレンス
+
+各ドキュメントの完全な日本語訳です(正は英語版。差異があれば英語版が優先されます):
+
+- なぜMuJoCo + viserなのか(Isaac Simとの比較): [ja/why_this_tool.md](ja/why_this_tool.md)
+- シーンYAML完全リファレンス: [ja/scenario_reference.md](ja/scenario_reference.md)
+- データ収集と学習(模倣学習のワークフロー): [ja/data_and_training.md](ja/data_and_training.md)
+- 実機SO-101のセットアップと安全性: [ja/hardware.md](ja/hardware.md)
+- アーキテクチャ(スレッドモデル・IK・座標系): [ja/architecture.md](ja/architecture.md)

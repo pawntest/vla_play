@@ -1,5 +1,7 @@
 # Data collection & training: the imitation-learning workflow
 
+日本語版: [docs/ja/data_and_training.md](ja/data_and_training.md)
+
 This page walks the full loop end to end: **define a scene → record demonstrations →
 train a policy (locally or on a free cloud GPU) → run it on the arm**. Everything up to
 the real-robot steps works with zero hardware.

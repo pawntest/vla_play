@@ -1,5 +1,7 @@
 # Why MuJoCo + viser (and not Isaac Sim)?
 
+日本語版: [docs/ja/why_this_tool.md](ja/why_this_tool.md)
+
 **日本語要約**: 本ツールは「SO-101で模倣学習のデータを集めて学習する」という目的に最適化した
 軽量スタックです。pipで数分で入り、GPU不要・ヘッドレスで動き、シーンはYAML数十行、
 データは最初からLeRobotDataset形式で出ます。Isaac Sim が勝るのは、フォトリアルなレンダリング

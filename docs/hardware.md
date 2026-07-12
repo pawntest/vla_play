@@ -1,5 +1,7 @@
 # Real SO-101 setup & safety
 
+日本語版: [docs/ja/hardware.md](ja/hardware.md)
+
 ## Prerequisites
 
 - Python >= 3.12 and `pip install -e ".[real]"` (installs `lerobot[feetech]`).

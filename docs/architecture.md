@@ -1,5 +1,7 @@
 # Architecture
 
+日本語版: [docs/ja/architecture.md](ja/architecture.md)
+
 ## Units & conventions (everywhere inside the package)
 
 - Arm joints: `q` = numpy `(5,)`, **radians**, order `[shoulder_pan, shoulder_lift,
