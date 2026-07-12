@@ -1,3 +1,6 @@
-"""so101_tool: SO-101 control with live 3D preview, rule-based and AI control."""
+"""so101_tool: SO-101 control with live 3D preview, rule-based and AI control.
 
-__version__ = "0.1.0"
+Public Python API: `from so101_tool import api` (see so101_tool/api.py).
+"""
+
+__version__ = "0.2.0"

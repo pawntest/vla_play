@@ -100,17 +100,32 @@ class RobotView:
 
         self._tcp_frame = server.scene.add_frame("/tcp", axes_length=0.05, axes_radius=0.0025)
         self._handles.append(self._tcp_frame)
+
+        # Deformables (cloth): flex meshes get their vertices re-sent per sync.
+        self._server = server
+        self._flexes: list[tuple[int, str, np.ndarray, tuple]] = []
+        self._flex_handles: dict[str, viser.MeshHandle] = {}
+        self._flex_tick = 0
+        for fid in range(model.nflex):
+            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_FLEX, fid) or f"flex{fid}"
+            ea, en = model.flex_elemadr[fid], model.flex_elemnum[fid]
+            faces = model.flex_elem[ea * 3 : (ea + en) * 3].reshape(-1, 3)
+            faces = faces - model.flex_vertadr[fid]  # local vertex indices
+            rgba = model.flex_rgba[fid]
+            self._flexes.append((fid, f"/cloth/{name}", faces.astype(np.uint32), tuple(rgba)))
+
         self.sync_qpos(self._data.qpos)
 
     def remove(self) -> None:
         """Remove every scene node this view created (App scene rebuild)."""
-        for h in self._handles:
+        for h in reversed(self._handles):  # children (meshes) before parent frames
             try:
                 h.remove()
             except Exception:
                 pass
         self._handles.clear()
         self._frames.clear()
+        self.remove_flex_handles()
 
     def sync_qpos(self, qpos: np.ndarray) -> None:
         """Update all body transforms (and the TCP axes) from a full model qpos."""
@@ -120,10 +135,36 @@ class RobotView:
         for bid, frame in self._frames:
             frame.position = data.xpos[bid]
             frame.wxyz = data.xquat[bid]
+        if self._flexes:
+            self._sync_flexes()
         wxyz = np.empty(4)
         mujoco.mju_mat2Quat(wxyz, data.site_xmat[self._tcp_sid].reshape(-1))
         self._tcp_frame.position = data.site_xpos[self._tcp_sid]
         self._tcp_frame.wxyz = wxyz
+
+    def _sync_flexes(self) -> None:
+        """Re-send cloth meshes (viser meshes are immutable, but cloth grids are
+        tiny — ~100 vertices — so replacing the node at ~15 Hz is cheap)."""
+        self._flex_tick += 1
+        if self._flex_tick % 2:
+            return
+        mujoco.mj_flex(self.model, self._data)
+        for fid, path, faces, rgba in self._flexes:
+            va, vn = self.model.flex_vertadr[fid], self.model.flex_vertnum[fid]
+            verts = self._data.flexvert_xpos[va : va + vn].astype(np.float32)
+            handle = self._server.scene.add_mesh_simple(
+                path, vertices=verts, faces=faces, color=rgba[:3],
+                flat_shading=False, side="double",
+            )
+            self._flex_handles[path] = handle
+
+    def remove_flex_handles(self) -> None:
+        for h in self._flex_handles.values():
+            try:
+                h.remove()
+            except Exception:
+                pass
+        self._flex_handles.clear()
 
     def sync(self, q: np.ndarray, gripper: float) -> None:
         """Arm-only convenience: joint values -> qpos (model must be the bare arm)."""

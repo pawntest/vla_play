@@ -21,7 +21,8 @@ so101-tool run --backend sim
 操作できます**(追加のターミナル不要):
 
 - **Scenario** — シーンYAMLの読み込み・物体配置のランダマイズ・物体の対話的な追加/削除
-  (種類・サイズ・位置・色・質量・ランダマイズ幅)・YAMLへの保存
+  (**ギズモのドラッグ移動**・**シーンクリックでその場に追加**)・カメラ編集(固定/アーム取付)・
+  環境編集(テーブル・床)・YAMLへの保存
 - **Mode** — `idle` / `mirror`(プレビューのみ)/ `rule`(動作プリミティブ)/ `policy`
 - **Joints / Cartesian** — 関節スライダー、Home、ターゲットギズモ、ツール座標系ジョグ
 - **Record dataset** — アームを操作しながら LeRobotDataset エピソードを開始/保存/破棄
@@ -105,8 +106,24 @@ so101-tool run --scenario my_task.yaml \
 データセットもチェックポイントも標準の LeRobot 形式なので、ここで学習したモデルは
 lerobot が動く環境ならどこでも(逆も同様に)利用できます。
 
+## Python API
+
+CLI・GUIの土台である `so101_tool.api` をそのままライブラリとして使えます:
+
+```python
+from so101_tool import api
+
+with api.Session(scenario="examples/tabletop_cloth.yaml") as sess:
+    sess.move_to([0.25, 0.0, 0.10])   # GUIと同じ安全フィルタを通るIK移動
+    sess.gripper(0.0)
+    sess.generate_demos("my/pick", episodes=30, root="data/pick")
+api.train(dataset="data/pick", policy="act")
+```
+
 ## 詳細
 
+- Isaac Sim等との比較・YAMLの表現力: [why_this_tool.md](why_this_tool.md)
+- シーンYAML完全リファレンス(環境・布・複数/取付カメラ): [scenario_reference.md](scenario_reference.md)
 - モジュール構成とスレッドモデル: [architecture.md](architecture.md)
 - 実機接続・キャリブレーション・安全手順: [hardware.md](hardware.md)
 - アームの3Dモデルは mujoco_menagerie の

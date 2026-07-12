@@ -125,10 +125,35 @@ class PhysicsBackend(RobotInterface):
             return self._data.qpos.copy()
 
     def object_pose(self, name: str) -> tuple[np.ndarray, np.ndarray]:
-        """World (position, wxyz) of a scenario object."""
+        """World (position, wxyz) of a scenario object (cloth: vertex centroid)."""
         with self._lock:
+            fid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_FLEX, f"obj_{name}")
+            if fid >= 0:
+                adr, num = self.model.flex_vertadr[fid], self.model.flex_vertnum[fid]
+                center = self._data.flexvert_xpos[adr : adr + num].mean(axis=0)
+                return center.copy(), np.array([1.0, 0.0, 0.0, 0.0])
             bid = self.model.body(f"obj_{name}").id
             return self._data.xpos[bid].copy(), self._data.xquat[bid].copy()
+
+    def set_object_pose(self, name: str, pos, wxyz=None) -> None:
+        """Teleport an object (GUI drag). Cloth is translated rigidly."""
+        from ..scenario import _shift_cloth
+
+        pos = np.asarray(pos, dtype=float)
+        with self._lock:
+            fid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_FLEX, f"obj_{name}")
+            if fid >= 0:
+                adr, num = self.model.flex_vertadr[fid], self.model.flex_vertnum[fid]
+                center = self._data.flexvert_xpos[adr : adr + num].mean(axis=0)
+                _shift_cloth(self.model, self._data, f"obj_{name}", pos - center)
+            else:
+                jid = self.model.joint(f"free_{name}").id
+                adr = self.model.jnt_qposadr[jid]
+                self._data.qpos[adr : adr + 3] = pos
+                if wxyz is not None:
+                    self._data.qpos[adr + 3 : adr + 7] = np.asarray(wxyz, dtype=float)
+                self._data.qvel[self.model.jnt_dofadr[jid] : self.model.jnt_dofadr[jid] + 6] = 0.0
+            mujoco.mj_forward(self.model, self._data)
 
     @property
     def camera_names(self) -> list[str]:

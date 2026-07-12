@@ -20,7 +20,15 @@ import viser
 from ..config import ARM_JOINTS, ARM_LIMITS_HI, ARM_LIMITS_LO
 from ..control.commands import Home, JogTool, Mode, MoveJ, MoveL, SetMode, Stop
 from ..control.loop import LoopSnapshot
-from ..scenario import ObjectSpec, Scenario, save_scenario
+from ..scenario import (
+    ATTACHABLE_BODIES,
+    CameraSpec,
+    FloorSpec,
+    ObjectSpec,
+    Scenario,
+    TableSpec,
+    save_scenario,
+)
 
 _MODES = [m.value for m in Mode]
 _SCENARIO_DIRS = ("examples", "scenarios")
@@ -36,10 +44,13 @@ def _find_scenarios() -> list[str]:
 class ControlPanel:
     def __init__(self, server: viser.ViserServer, app):
         self._app = app
+        self._server = server
         self._loop = app.loop
         self._config = app.config
         self._tick = 0
         self._nl_busy = False
+        self._drag_gizmos: list = []
+        self._click_add_registered = False
         gui = server.gui
         scenario = app.scenario
 
@@ -65,9 +76,16 @@ class ControlPanel:
                                                     initial_value=names[0])
                     rm_btn = gui.add_button("Remove selected")
                     rm_btn.on_click(lambda _: self._remove_object())
+                    self._drag_cb = gui.add_checkbox("🖱 Drag objects (gizmos)",
+                                                     initial_value=False)
+                    self._drag_cb.on_update(lambda _: self._toggle_drag_gizmos())
+                    self._click_add_cb = gui.add_checkbox("➕ Click scene to add object",
+                                                          initial_value=False)
+                    self._click_add_cb.on_update(lambda _: self._toggle_click_add())
                     self._new_name = gui.add_text("new name", initial_value="obj1")
                     self._new_type = gui.add_dropdown(
-                        "type", options=["box", "sphere", "cylinder"], initial_value="box"
+                        "type", options=["box", "sphere", "cylinder", "cloth"],
+                        initial_value="box",
                     )
                     self._new_size = gui.add_vector3(
                         "size (m)", initial_value=(0.015, 0.015, 0.015), step=0.005
@@ -83,11 +101,57 @@ class ControlPanel:
                     )
                     add_btn = gui.add_button("Add object → rebuild scene")
                     add_btn.on_click(lambda _: self._add_object())
-                    self._save_path = gui.add_text(
-                        "save as", initial_value=scenario.source_path or "scenarios/my_scene.yaml"
+
+                with gui.add_folder("Cameras", expand_by_default=False):
+                    cam_names = [c.name for c in scenario.cameras] or ["-"]
+                    self._cam_dd = gui.add_dropdown("camera", options=cam_names,
+                                                    initial_value=cam_names[0])
+                    cam_rm = gui.add_button("Remove selected camera")
+                    cam_rm.on_click(lambda _: self._remove_camera())
+                    self._cam_name = gui.add_text("new name", initial_value="cam1")
+                    self._cam_attach = gui.add_dropdown(
+                        "attach to", options=["world"] + ATTACHABLE_BODIES,
+                        initial_value="world",
                     )
-                    save_btn = gui.add_button("Save scenario YAML")
-                    save_btn.on_click(lambda _: self._save_scenario())
+                    self._cam_pos = gui.add_vector3(
+                        "pos (m)", initial_value=(0.5, -0.3, 0.35), step=0.01
+                    )
+                    self._cam_lookat = gui.add_vector3(
+                        "look at (m)", initial_value=(0.25, 0.0, 0.05), step=0.01
+                    )
+                    self._cam_fovy = gui.add_slider("fovy (deg)", min=20, max=120, step=1,
+                                                    initial_value=58)
+                    cam_add = gui.add_button("Add camera → rebuild scene")
+                    cam_add.on_click(lambda _: self._add_camera())
+                    gui.add_markdown(
+                        "*attach to an arm body for wrist/tool cams; pos+lookat are then "
+                        "in that body's frame*"
+                    )
+
+                with gui.add_folder("Environment", expand_by_default=False):
+                    env = scenario.environment
+                    self._env_table = gui.add_checkbox("table", initial_value=env.table is not None)
+                    tbl = env.table or TableSpec()
+                    self._env_table_size = gui.add_vector2(
+                        "table size (m)", initial_value=tuple(tbl.size), step=0.05
+                    )
+                    self._env_table_rgb = gui.add_rgb(
+                        "table color", initial_value=tuple(int(c * 255) for c in tbl.rgba[:3])
+                    )
+                    self._env_checker = gui.add_checkbox("checker floor",
+                                                         initial_value=env.floor.checker)
+                    self._env_floor_rgb = gui.add_rgb(
+                        "floor color",
+                        initial_value=tuple(int(c * 255) for c in env.floor.rgba[:3]),
+                    )
+                    env_btn = gui.add_button("Apply environment → rebuild scene")
+                    env_btn.on_click(lambda _: self._apply_environment())
+
+                self._save_path = gui.add_text(
+                    "save as", initial_value=scenario.source_path or "scenarios/my_scene.yaml"
+                )
+                save_btn = gui.add_button("Save scenario YAML")
+                save_btn.on_click(lambda _: self._save_scenario())
 
         # ---- Status / e-stop ---------------------------------------------------
         with gui.add_folder("Status"):
@@ -252,6 +316,19 @@ class ControlPanel:
                 self._nl_log = gui.add_markdown("")
                 self._nl_send.on_click(lambda _: self._send_nl())
 
+    def cleanup_scene(self) -> None:
+        """Remove scene nodes owned by this panel (called before a rebuild)."""
+        for g in self._drag_gizmos:
+            try:
+                g.remove()
+            except Exception:
+                pass
+        self._drag_gizmos.clear()
+        try:
+            self._gizmo.remove()
+        except Exception:
+            pass
+
     # -- helpers ------------------------------------------------------------------
 
     def _put(self, cmd) -> None:
@@ -267,6 +344,89 @@ class ControlPanel:
         sel = self._scene_dd.value
         self._app.rebuild(None if sel == "(bare arm)" else sel)
 
+    # -- interactive placement -------------------------------------------------
+
+    def _toggle_drag_gizmos(self) -> None:
+        for g in self._drag_gizmos:
+            try:
+                g.remove()
+            except Exception:
+                pass
+        self._drag_gizmos.clear()
+        if not self._drag_cb.value:
+            return
+        backend = self._app.backend
+        for obj in self._app.scenario.objects:
+            try:
+                pos, wxyz = backend.object_pose(obj.name)
+            except Exception:
+                continue
+            gizmo = self._server.scene.add_transform_controls(
+                f"/edit/{obj.name}", scale=0.1, position=pos, wxyz=wxyz,
+                disable_rotations=obj.is_cloth,
+            )
+
+            def _moved(_evt, name=obj.name, g=gizmo):
+                self._app.backend.set_object_pose(name, np.array(g.position),
+                                                  np.array(g.wxyz))
+
+            gizmo.on_update(_moved)
+            self._drag_gizmos.append(gizmo)
+
+    def _toggle_click_add(self) -> None:
+        if self._click_add_cb.value and not self._click_add_registered:
+            self._click_add_registered = True
+
+            @self._server.scene.on_pointer_event(event_type="click")
+            def _(event) -> None:
+                if not self._click_add_cb.value:
+                    return
+                o = np.array(event.ray_origin)
+                d = np.array(event.ray_direction)
+                if abs(d[2]) < 1e-6:
+                    return
+                # intersect the click ray with the working surface (z = 0)
+                t = -o[2] / d[2]
+                if t <= 0:
+                    return
+                hit = o + t * d
+                self._new_pos.value = (round(float(hit[0]), 3), round(float(hit[1]), 3),
+                                       max(self._new_size.value[2], 0.01))
+                self._add_object()
+
+    def _remove_camera(self) -> None:
+        sc = self._edited_scenario()
+        name = self._cam_dd.value
+        sc.cameras = [c for c in sc.cameras if c.name != name]
+        self._app.rebuild_with_scenario(sc)
+
+    def _add_camera(self) -> None:
+        sc = self._edited_scenario()
+        attach = self._cam_attach.value
+        sc.cameras.append(
+            CameraSpec(
+                name=self._cam_name.value.strip() or f"cam{len(sc.cameras) + 1}",
+                pos=list(self._cam_pos.value),
+                lookat=list(self._cam_lookat.value),
+                fovy=float(self._cam_fovy.value),
+                attach_to=None if attach == "world" else attach,
+            )
+        )
+        self._app.rebuild_with_scenario(sc)
+
+    def _apply_environment(self) -> None:
+        sc = self._edited_scenario()
+        floor_rgb = [c / 255.0 for c in self._env_floor_rgb.value]
+        sc.environment.floor = FloorSpec(rgba=[*floor_rgb, 1.0],
+                                         checker=self._env_checker.value)
+        if self._env_table.value:
+            tbl_rgb = [c / 255.0 for c in self._env_table_rgb.value]
+            sc.environment.table = TableSpec(size=list(self._env_table_size.value),
+                                             rgba=[*tbl_rgb, 1.0])
+        else:
+            sc.environment.table = None
+        self._app.rebuild_with_scenario(sc)
+
     def _edited_scenario(self) -> Scenario:
         sc = self._app.scenario
         sc.task = self._task_input.value
@@ -276,11 +436,20 @@ class ControlPanel:
         sc = self._edited_scenario()
         rgb = [c / 255.0 for c in self._new_color.value]
         noise_m = self._new_noise.value / 100.0
+        base = self._new_name.value.strip() or "obj"
+        name = base
+        taken = {o.name for o in sc.objects}
+        i = 1
+        while name in taken:
+            i += 1
+            name = f"{base}{i}"
+        kind = self._new_type.value
+        size = list(self._new_size.value)
         sc.objects.append(
             ObjectSpec(
-                name=self._new_name.value.strip() or f"obj{len(sc.objects) + 1}",
-                type=self._new_type.value,
-                size=list(self._new_size.value),
+                name=name,
+                type=kind,
+                size=size[:2] if kind == "cloth" else size,
                 pos=list(self._new_pos.value),
                 rgba=[*rgb, 1.0],
                 mass=float(self._new_mass.value),

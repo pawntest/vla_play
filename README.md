@@ -24,7 +24,8 @@ You get a browser 3D scene with the arm and a control panel. **Everything the to
 do is available from this UI** — no extra terminals needed:
 
 - **Scenario** — load a scene YAML, randomize object poses, add/remove objects
-  interactively (type, size, position, color, mass, randomization) and save back to YAML
+  interactively (incl. **drag gizmos** and **click-in-scene placement**), edit cameras
+  (world-fixed or arm-attached) and the environment (table, floor), save back to YAML
 - **Mode** — `idle` / `mirror` (preview only) / `rule` (motion primitives) / `policy`
 - **Joints / Cartesian** — sliders, *Home*, target gizmo + *Go to target*, tool-frame jogs
 - **Record dataset** — start/save/discard LeRobotDataset episodes while you drive the arm
@@ -35,6 +36,24 @@ do is available from this UI** — no extra terminals needed:
 - **EMERGENCY STOP** — latching; no command reaches the robot until reset
 
 Check IK health any time (no hardware): `so101-tool ik-check --n 100`
+
+## Python API
+
+Everything is scriptable — `so101_tool.api` is the library the CLI and GUI are built on:
+
+```python
+from so101_tool import api
+
+with api.Session(scenario="examples/tabletop_cloth.yaml") as sess:
+    sess.move_to([0.25, 0.0, 0.10])            # IK move (same safety filter as the GUI)
+    sess.gripper(0.0)
+    print(sess.state().tcp_position, sess.object_pose("cube"))
+    sess.generate_demos("my/pick", episodes=30, root="data/pick")
+api.train(dataset="data/pick", policy="act")
+```
+
+`api.Session` also drives the real robot (`backend="real"`) and can serve the browser UI
+on top of itself (`sess.open_ui()`).
 
 ## Real robot
 
@@ -108,8 +127,9 @@ anywhere lerobot runs (and vice versa).
 
 | Module | Role |
 | --- | --- |
+| `api.py` | public Python API: `Session` (motion, scenes, demos, policies) + `train()` |
 | `kinematics.py` | MuJoCo FK + [mink](https://github.com/kevinzakka/mink) differential IK (TCP = `gripperframe` site) |
-| `scenario.py` | YAML scenes (objects w/ randomization, cameras, task) compiled to one MuJoCo model |
+| `scenario.py` | YAML scenes: environment (table/floor/props), rigid + **cloth** objects w/ randomization, world/arm-attached cameras |
 | `robot/sim.py`, `robot/physics_sim.py`, `robot/lerobot_backend.py` | Interchangeable backends behind `RobotInterface`: kinematic sim, contact-physics sim (rendered cameras), real robot |
 | `control/loop.py` | 50 Hz thread owning all robot I/O: command queue in, immutable snapshots out, latching e-stop |
 | `control/safety.py` | Joint-limit clamp, velocity limit, floor check on every write |
@@ -130,6 +150,12 @@ Details in [docs/architecture.md](docs/architecture.md). The arm model is
 - The **EMERGENCY STOP** button latches: motion commands are refused until *Reset e-stop*.
 - On first real-robot use, follow the sign-check procedure in
   [docs/hardware.md](docs/hardware.md) before commanding any motion.
+
+## See also
+
+- [docs/why_this_tool.md](docs/why_this_tool.md) — honest comparison with Isaac Sim & friends
+- [docs/scenario_reference.md](docs/scenario_reference.md) — full scene YAML reference
+  (environment, objects incl. **cloth**, multi/attached cameras, randomization)
 
 ## Development
 

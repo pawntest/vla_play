@@ -110,61 +110,23 @@ class ScriptedDemosArgs:
 
 
 def _scripted_demos(args: ScriptedDemosArgs) -> None:
-    from .data.recorder import DatasetRecorder
-    from .demo.scripted import PickParams, make_backend_and_pick
+    from .demo.generate import generate_demo_dataset
     from .scenario import load_scenario
 
-    scenario = load_scenario(args.scenario)
-    if not scenario.objects:
-        raise SystemExit("scenario has no objects to pick")
-    object_name = args.object_name or scenario.objects[0].name
+    def progress(attempt, saved, ok):
+        print(f"episode {attempt}: {'SUCCESS' if ok else 'fail'} — saved {saved}/{args.episodes}")
 
-    config = AppConfig()
-    backend, pick = make_backend_and_pick(
-        scenario,
-        config.joint_map,
-        args.render_width,
-        args.render_height,
-        seed=args.seed,
-        params=PickParams(object_name=object_name),
-        sample_hz=args.fps,
+    result = generate_demo_dataset(
+        load_scenario(args.scenario), args.dataset, args.episodes,
+        root=args.root, object_name=args.object_name, fps=args.fps, seed=args.seed,
+        keep_failures=args.keep_failures, resume=args.resume,
+        render_width=args.render_width, render_height=args.render_height,
+        joint_map=AppConfig().joint_map, max_attempts_factor=args.max_attempts_factor,
+        on_progress=progress,
     )
-    recorder = DatasetRecorder(
-        repo_id=args.dataset,
-        fps=args.fps,
-        cameras={n: (args.render_height, args.render_width) for n in backend.camera_names},
-        joint_map=config.joint_map,
-        root=args.root,
-        task=scenario.task,
-        resume=args.resume,
-    )
-
-    def sample(state, q_cmd, gripper_cmd):
-        recorder.add_frame(
-            q=state.q,
-            gripper=state.gripper,
-            q_cmd=q_cmd,
-            gripper_cmd=gripper_cmd,
-            images=backend.get_camera_frames(),
-        )
-
-    saved = attempts = 0
-    try:
-        while saved < args.episodes and attempts < args.episodes * args.max_attempts_factor:
-            attempts += 1
-            backend.reset(randomize=True)
-            recorder.start_episode()
-            ok = pick.run_episode(sample)
-            keep = ok or args.keep_failures
-            recorder.end_episode(save=keep)
-            saved += keep
-            print(f"episode {attempts}: {'SUCCESS' if ok else 'fail'} — saved {saved}/{args.episodes}")
-    finally:
-        root = recorder.finalize()
-        backend.disconnect()
-    print(f"\ndataset written: {root} ({saved} episodes)")
+    print(f"\ndataset written: {result.dataset_root} ({result.saved} episodes)")
     print(f"train with:  so101-tool train --dataset {args.dataset}"
-          + (f" --dataset-root {root}" if args.root else ""))
+          + (f" --dataset-root {result.dataset_root}" if args.root else ""))
 
 
 @dataclasses.dataclass

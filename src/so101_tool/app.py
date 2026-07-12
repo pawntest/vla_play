@@ -19,11 +19,11 @@ from pathlib import Path
 
 import viser
 
+from .api import Session
 from .config import AppConfig
 from .control.commands import Mode, SetMode
-from .control.loop import ControlLoop
 from .kinematics import Kinematics
-from .scenario import Scenario, load_scenario
+from .scenario import Scenario
 from .viz.recording import RecorderBridge
 from .viz.robot_view import RobotView
 
@@ -39,9 +39,7 @@ class App:
         self.record_root = record_root
         self.record_fps = record_fps
         self.lock = threading.RLock()
-        self.scenario: Scenario | None = None
-        self.backend = None
-        self.loop: ControlLoop | None = None
+        self.session: Session | None = None
         self.view: RobotView | None = None
         self.panel = None
         self.recorder: RecorderBridge | None = None
@@ -57,46 +55,69 @@ class App:
 
         self._build(scenario_path)
 
+    # -- component aliases (the panel reads these) --------------------------------
+
+    @property
+    def scenario(self) -> Scenario | None:
+        return self.session.scenario if self.session else None
+
+    @property
+    def backend(self):
+        return self.session.robot if self.session else None
+
+    @property
+    def loop(self):
+        return self.session.loop if self.session else None
+
     # -- construction / rebuild -------------------------------------------------
 
-    def _make_backend(self, scenario: Scenario | None):
-        if scenario is not None:
-            from .robot.physics_sim import PhysicsBackend
+    @classmethod
+    def from_session(cls, server: viser.ViserServer, session: Session) -> "App":
+        """Attach the GUI to an already-running api.Session."""
+        app = cls.__new__(cls)
+        app.server = server
+        app.config = session.config
+        app.record_repo = app.record_root = None
+        app.record_fps = 15
+        app.lock = threading.RLock()
+        app.session = None
+        app.view = None
+        app.panel = None
+        app.recorder = None
+        app.nl_agent = None
+        app.scene_status = ""
+        app.policy_status = "no policy loaded"
+        app.demo_status = "idle"
+        app.train_status = "idle"
+        app._train_proc = None
+        app._busy = threading.Lock()
+        app._attach(session)
+        return app
 
-            return PhysicsBackend(
-                scenario, self.config.joint_map,
-                self.config.render_width, self.config.render_height,
-            )
-        if self.config.backend == "real":
-            from .robot.lerobot_backend import LeRobotBackend
-
-            return LeRobotBackend(self.config)
-        from .robot.sim import SimBackend
-
-        return SimBackend(self.config.joint_map)
-
-    def _build(self, scenario_path: str | None) -> None:
+    def _attach(self, session: Session) -> None:
+        """Point the GUI at a (fresh) Session and rebuild view + panel."""
         from .viz.panel import ControlPanel  # circular-import guard
 
-        scenario = load_scenario(scenario_path) if scenario_path else None
-        backend = self._make_backend(scenario)
-        backend.connect()
-        loop = ControlLoop(backend, Kinematics(), self.config)
-        loop.start()
         with self.lock:
-            self.scenario = scenario
-            self.backend = backend
-            self.loop = loop
+            self.session = session
+            if self.panel is not None:
+                self.panel.cleanup_scene()
             if self.view is not None:
                 self.view.remove()
             self.server.gui.reset()
             self.view = RobotView(
-                self.server, backend.model if scenario is not None else Kinematics()
+                self.server,
+                session.robot.model if session.scenario is not None else Kinematics(),
             )
             self._maybe_nl_agent()
             self.recorder = None
             self.panel = ControlPanel(self.server, self)
-        self.scene_status = f"scene: {scenario.name}" if scenario else "scene: bare arm"
+        name = session.scenario.name if session.scenario else "bare arm"
+        self.scene_status = f"scene: {name}"
+
+    def _build(self, scenario_path: str | None) -> None:
+        self._attach(Session(backend=self.config.backend, scenario=scenario_path,
+                             config=self.config))
 
     def _maybe_nl_agent(self) -> None:
         import os
@@ -113,12 +134,9 @@ class App:
                 self.recorder.finalize()
             except Exception:
                 pass
-        if self.loop is not None:
-            self.loop.stop()
-            self.loop.join(timeout=2.0)
-        if self.backend is not None:
+        if self.session is not None:
             try:
-                self.backend.disconnect()
+                self.session.close()
             except Exception:
                 pass
 
@@ -150,23 +168,7 @@ class App:
             try:
                 self.scene_status = "rebuilding scene…"
                 self._teardown()
-                from .viz.panel import ControlPanel
-
-                backend = self._make_backend(scenario)
-                backend.connect()
-                loop = ControlLoop(backend, Kinematics(), self.config)
-                loop.start()
-                with self.lock:
-                    self.scenario = scenario
-                    self.backend = backend
-                    self.loop = loop
-                    if self.view is not None:
-                        self.view.remove()
-                    self.server.gui.reset()
-                    self.view = RobotView(self.server, backend.model)
-                    self._maybe_nl_agent()
-                    self.recorder = None
-                    self.panel = ControlPanel(self.server, self)
+                self._attach(Session(scenario=scenario, config=self.config))
                 self.scene_status = f"scene: {scenario.name} (edited)"
             except Exception as exc:
                 self.scene_status = f"error: {exc}"
@@ -228,42 +230,22 @@ class App:
                 self.demo_status = "busy — another task is running"
                 return
             try:
-                from .data.recorder import DatasetRecorder
-                from .demo.scripted import PickParams, make_backend_and_pick
+                from .demo.generate import generate_demo_dataset
 
-                self.demo_status = "building generation sim…"
-                backend, pick = make_backend_and_pick(
-                    scenario, self.config.joint_map,
-                    self.config.render_width, self.config.render_height,
-                    seed=seed, params=PickParams(object_name=scenario.objects[0].name),
-                    sample_hz=fps,
-                )
                 root_path = root.strip() or None
                 resume = bool(root_path and (Path(root_path) / "meta" / "info.json").exists())
-                recorder = DatasetRecorder(
-                    repo_id=repo_id.strip(), fps=fps,
-                    cameras={n: (self.config.render_height, self.config.render_width)
-                             for n in backend.camera_names},
-                    joint_map=self.config.joint_map, root=root_path,
-                    task=scenario.task, resume=resume,
+
+                def progress(attempt, saved, ok):
+                    self.demo_status = f"generating… {saved}/{episodes} (attempt {attempt})"
+
+                self.demo_status = "building generation sim…"
+                result = generate_demo_dataset(
+                    scenario, repo_id.strip(), episodes, root=root_path, fps=fps,
+                    seed=seed, resume=resume, joint_map=self.config.joint_map,
+                    render_width=self.config.render_width,
+                    render_height=self.config.render_height, on_progress=progress,
                 )
-
-                def sample(state, q_cmd, g_cmd):
-                    recorder.add_frame(q=state.q, gripper=state.gripper, q_cmd=q_cmd,
-                                       gripper_cmd=g_cmd, images=backend.get_camera_frames())
-
-                saved = attempts = 0
-                while saved < episodes and attempts < episodes * 3:
-                    attempts += 1
-                    backend.reset(randomize=True)
-                    recorder.start_episode()
-                    ok = pick.run_episode(sample)
-                    recorder.end_episode(save=ok)
-                    saved += ok
-                    self.demo_status = f"generating… {saved}/{episodes} (attempt {attempts})"
-                out = recorder.finalize()
-                backend.disconnect()
-                self.demo_status = f"done: {saved} episodes → {out}"
+                self.demo_status = f"done: {result.saved} episodes → {result.dataset_root}"
             except Exception as exc:
                 self.demo_status = f"error: {exc}"
             finally:

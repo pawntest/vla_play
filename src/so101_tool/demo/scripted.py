@@ -30,10 +30,11 @@ _GRIPPER_VMAX = 2.0  # fraction/s
 class PickParams:
     object_name: str = "cube"
     approach_height: float = 0.07  # m above the object for the pre-grasp pose
-    grasp_offset: tuple = (0.0, 0.0, 0.008)  # TCP offset from object center at grasp
+    grasp_offset: tuple = (0.0, 0.0, 0.012)  # TCP offset from object center at grasp
+    radial_offset: float = 0.0  # m along base->object horizontal dir (negative = short)
     open_fraction: float = 1.0
     close_fraction: float = 0.0
-    close_duration: float = 1.2  # s: jaws stall on the object, so run a fixed time
+    close_duration: float = 1.5  # s: jaws stall on the object, so run a fixed time
     lift_height: float = 0.12
     success_lift: float = 0.05  # object must rise this much above its start z
     speed: float = 0.7
@@ -122,7 +123,10 @@ class ScriptedPick:
         p = self.params
         obj_pos, _ = self._backend.object_pose(p.object_name)
         start_z = obj_pos[2]
-        grasp = obj_pos + np.asarray(p.grasp_offset)
+        radial = obj_pos.copy()
+        radial[2] = 0.0
+        radial = radial / max(np.linalg.norm(radial), 1e-9)
+        grasp = obj_pos + np.asarray(p.grasp_offset) + p.radial_offset * radial
         above = grasp + [0.0, 0.0, p.approach_height]
 
         state = self._backend.read_state()
