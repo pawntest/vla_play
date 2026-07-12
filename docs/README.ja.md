@@ -106,6 +106,11 @@ so101-tool run --scenario my_task.yaml \
 データセットもチェックポイントも標準の LeRobot 形式なので、ここで学習したモデルは
 lerobot が動く環境ならどこでも(逆も同様に)利用できます。
 
+## リモートテレオペ(Codespaces / Brev / SSH先)
+
+リモートコンテナ上のアプリを、手元のリーダーアームで安全に操作できます
+(127.0.0.1+トークン、SSHトンネル経由のみ)。詳細: [ja/teleop_remote.md](ja/teleop_remote.md)
+
 ## Python API
 
 CLI・GUIの土台である `so101_tool.api` をそのままライブラリとして使えます:

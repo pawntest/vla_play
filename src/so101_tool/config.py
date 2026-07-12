@@ -111,6 +111,10 @@ class AppConfig:
     render_width: int = 320
     render_height: int = 240
     no_nl: bool = False  # disable the Claude NL agent even if an API key is set
+    # Remote teleop receiver (see teleop/receiver.py — 127.0.0.1 + token only)
+    teleop: bool = False
+    teleop_port: int = 8765
+    teleop_token: str | None = None  # None -> random per-session token
     # lerobot camera configs passed through to SO101FollowerConfig, e.g.
     # {"front": {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30}}
     cameras: dict = field(default_factory=dict)

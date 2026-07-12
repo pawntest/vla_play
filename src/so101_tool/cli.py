@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import time
 
 import numpy as np
@@ -46,6 +47,13 @@ class RunArgs:
     render_width: int = 320
     render_height: int = 240
     """Scenario camera resolution (policy obs + recording)."""
+    teleop: bool = False
+    """Start the remote-teleop receiver (127.0.0.1 + session token; use ssh -L)."""
+    teleop_port: int = 8765
+    """Local port for the teleop receiver."""
+    teleop_token: str | None = None
+    """Teleop session token (default: random, printed at startup).
+    Can also be set via SO101_TELEOP_TOKEN."""
 
 
 def _run(args: RunArgs) -> None:
@@ -65,6 +73,9 @@ def _run(args: RunArgs) -> None:
         render_width=args.render_width,
         render_height=args.render_height,
         no_nl=args.no_nl,
+        teleop=args.teleop,
+        teleop_port=args.teleop_port,
+        teleop_token=args.teleop_token or os.environ.get("SO101_TELEOP_TOKEN"),
     )
     if args.nl_model:
         config.nl_model = args.nl_model
@@ -80,6 +91,12 @@ def _run(args: RunArgs) -> None:
     )
     print()
     print(f"  ▶ 3D preview: http://localhost:{config.viser_port}")
+    if app.teleop_rx is not None:
+        rx = app.teleop_rx
+        print(f"  ▶ teleop receiver: 127.0.0.1:{rx.port} (SSH tunnel only)")
+        print(f"    on your laptop:  ssh -L {rx.port}:localhost:{rx.port} <this-host>")
+        print(f"                     so101-tool teleop-client --connect localhost:{rx.port} \\")
+        print(f"                         --token {rx.token} --port /dev/ttyACM0")
     print("    Ctrl-C to exit.")
     print()
     run_app(app, config.render_hz)
@@ -127,6 +144,34 @@ def _scripted_demos(args: ScriptedDemosArgs) -> None:
     print(f"\ndataset written: {result.dataset_root} ({result.saved} episodes)")
     print(f"train with:  so101-tool train --dataset {args.dataset}"
           + (f" --dataset-root {result.dataset_root}" if args.root else ""))
+
+
+@dataclasses.dataclass
+class TeleopClientArgs:
+    """Stream a local leader arm to a (remote) so101-tool app (see docs/teleop_remote.md)."""
+
+    connect: str = "localhost:8765"
+    """host:port of the receiver (through your SSH tunnel)."""
+    token: str = ""
+    """Session token printed by the remote `so101-tool run --teleop` (or SO101_TELEOP_TOKEN)."""
+    source: str = "leader"
+    """'leader' = real SO-101 leader arm (lerobot, py>=3.12); 'sine' = hardware-free test."""
+    port: str = "/dev/ttyACM0"
+    """Serial port of the leader arm."""
+    robot_id: str = "so101_leader"
+    """lerobot calibration id of the leader arm."""
+    hz: float = 50.0
+    """Streaming rate."""
+
+
+def _teleop_client(args: TeleopClientArgs) -> None:
+    from .teleop.client import run_teleop_client
+
+    token = args.token or os.environ.get("SO101_TELEOP_TOKEN", "")
+    if not token:
+        raise SystemExit("--token is required (printed by the remote 'so101-tool run --teleop')")
+    run_teleop_client(args.connect, token, source=args.source,
+                      serial_port=args.port, robot_id=args.robot_id, hz=args.hz)
 
 
 @dataclasses.dataclass
@@ -178,6 +223,7 @@ def main() -> None:
     args = tyro.extras.subcommand_cli_from_dict(
         {
             "run": RunArgs,
+            "teleop-client": TeleopClientArgs,
             "scripted-demos": ScriptedDemosArgs,
             "train": TrainArgs,
             "ik-check": IkCheckArgs,
@@ -185,6 +231,8 @@ def main() -> None:
     )
     if isinstance(args, RunArgs):
         _run(args)
+    elif isinstance(args, TeleopClientArgs):
+        _teleop_client(args)
     elif isinstance(args, ScriptedDemosArgs):
         _scripted_demos(args)
     elif isinstance(args, TrainArgs):

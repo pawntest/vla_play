@@ -19,6 +19,7 @@ class Mode(enum.Enum):
     MIRROR = "mirror"  # read real joints -> 3D preview only (hand-pose the robot)
     RULE = "rule"  # execute motion primitives (also used by the NL agent)
     POLICY = "policy"  # lerobot policy inference drives the robot
+    TELEOP = "teleop"  # a (remote) leader arm streams targets (teleop/receiver)
 
 
 @dataclass

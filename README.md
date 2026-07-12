@@ -93,6 +93,19 @@ so101-tool run --backend real --port /dev/ttyACM0 \
 Switch the mode to `policy` in the panel. Policies need camera observations, so this mode
 requires the real backend (documented limitation of the sim backend).
 
+## Remote teleop (Codespaces / Brev / any SSH box)
+
+Run the app on a remote container and drive it with the leader arm on your desk —
+securely (127.0.0.1 + session token, reached only through your SSH tunnel):
+
+```bash
+remote$ so101-tool run --scenario examples/pick_cube.yaml --teleop
+laptop$ ssh -L 8765:localhost:8765 <remote>
+laptop$ so101-tool teleop-client --connect localhost:8765 --token <printed> --port /dev/ttyACM0
+```
+
+See [docs/teleop_remote.md](docs/teleop_remote.md). Test without hardware: `--source sine`.
+
 ## Imitation learning: record → train → deploy
 
 The tool covers the full imitation-learning loop, sim-first and with a free-GPU cloud

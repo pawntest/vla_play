@@ -148,6 +148,7 @@ class ControlLoop(threading.Thread):
         self._kin = kinematics
         self._config = config
         self._policy = policy_runner
+        self._teleop = None  # optional target source (teleop/receiver contract)
         self._safety = SafetyFilter(config.joint_map)
         self._mode = Mode.IDLE
         self._active: _Executor | None = None
@@ -165,6 +166,10 @@ class ControlLoop(threading.Thread):
     def set_policy_runner(self, runner) -> None:
         """Swap the policy runner at runtime (GIL-atomic reference assignment)."""
         self._policy = runner
+
+    def set_teleop_source(self, source) -> None:
+        """Swap the teleop target source (object with .step(state) -> (q, g) | None)."""
+        self._teleop = source
 
     def estop(self) -> None:
         """Latching emergency stop (takes effect within one tick)."""
@@ -215,6 +220,9 @@ class ControlLoop(threading.Thread):
         if isinstance(cmd, SetMode):
             if cmd.mode is Mode.POLICY and self._policy is None:
                 cmd.finish(error="no policy loaded (--policy-path)")
+                return
+            if cmd.mode is Mode.TELEOP and self._teleop is None:
+                cmd.finish(error="teleop receiver is not running (--teleop)")
                 return
             if self._mode is Mode.RULE and cmd.mode is not Mode.RULE:
                 self._abort_active("mode changed")
@@ -280,9 +288,10 @@ class ControlLoop(threading.Thread):
                     except Exception as exc:
                         self._abort_active(f"primitive failed: {exc}")
                         self._error = str(exc)
-            elif self._mode is Mode.POLICY:
+            elif self._mode in (Mode.POLICY, Mode.TELEOP):
+                source = self._policy if self._mode is Mode.POLICY else self._teleop
                 try:
-                    result = self._policy.step(state)
+                    result = source.step(state)
                     if result is not None:
                         q_t, g_t = result
                         q_cmd = np.asarray(q_t, dtype=float).copy()

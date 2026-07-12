@@ -257,6 +257,17 @@ class Session:
     def stop_policy(self) -> None:
         self.set_mode(Mode.IDLE)
 
+    def enable_teleop(self, port: int = 8765, token: str | None = None):
+        """Start the remote-teleop receiver (127.0.0.1 + token; reach it via
+        ssh -L) and switch the loop to TELEOP mode. Returns the receiver —
+        its .token goes to `so101-tool teleop-client` on the operator's machine."""
+        from .teleop.receiver import TeleopReceiver
+
+        rx = TeleopReceiver(port=port, token=token)
+        self.loop.set_teleop_source(rx)
+        self.set_mode(Mode.TELEOP)
+        return rx
+
     # -- GUI ---------------------------------------------------------------------------
 
     def open_ui(self, port: int = 8080) -> None:

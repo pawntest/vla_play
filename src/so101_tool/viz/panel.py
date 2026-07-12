@@ -220,6 +220,24 @@ class ControlPanel:
 
             btn.on_click(_jog)
 
+        # ---- Remote teleop ---------------------------------------------------------------
+        if app.teleop_rx is not None:
+            rx = app.teleop_rx
+            with gui.add_folder("Remote teleop", expand_by_default=True):
+                self._teleop_md = gui.add_markdown("waiting…")
+                gui.add_markdown(
+                    "connect from your laptop:\n\n"
+                    f"```\nssh -L {rx.port}:localhost:{rx.port} <this-host>\n"
+                    f"so101-tool teleop-client --connect localhost:{rx.port} \\\n"
+                    f"    --token {rx.token} --port /dev/ttyACM0\n```"
+                )
+                teleop_on = gui.add_button("Enable TELEOP mode")
+                teleop_off = gui.add_button("Stop teleop (→ idle)")
+            teleop_on.on_click(lambda _: self._put(SetMode(mode=Mode.TELEOP)))
+            teleop_off.on_click(lambda _: self._put(SetMode(mode=Mode.IDLE)))
+        else:
+            self._teleop_md = None
+
         # ---- Record dataset -------------------------------------------------------------
         has_cameras = hasattr(app.backend, "get_camera_frames")
         with gui.add_folder("Record dataset", expand_by_default=False):
@@ -505,6 +523,12 @@ class ControlPanel:
         if snap is None or self._tick % 6:  # ~5 Hz text updates at 30 Hz render
             return
         app = self._app
+        if self._teleop_md is not None and app.teleop_rx is not None:
+            rx = app.teleop_rx
+            live = "🟢 streaming" if rx.fresh else f"⚪ {rx.status}"
+            tcontent = f"{live} — 127.0.0.1:{rx.port} (token-protected, SSH tunnel only)"
+            if self._teleop_md.content != tcontent:
+                self._teleop_md.content = tcontent
         if app.recorder is not None:
             marker = "🔴 " if app.recorder.recording else ""
             content = f"{marker}{app.recorder.status} — episodes saved: {app.recorder.episodes}"

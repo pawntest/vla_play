@@ -54,6 +54,12 @@ class App:
         self.train_status = "idle"
         self._train_proc: subprocess.Popen | None = None
         self._busy = threading.Lock()  # one heavy worker at a time
+        self.teleop_rx = None
+        if config.teleop:
+            from .teleop.receiver import TeleopReceiver
+
+            self.teleop_rx = TeleopReceiver(port=config.teleop_port,
+                                            token=config.teleop_token)
 
         self._build(scenario_path)
 
@@ -94,6 +100,12 @@ class App:
         app.train_status = "idle"
         app._train_proc = None
         app._busy = threading.Lock()
+        app.teleop_rx = None
+        if session.config.teleop:
+            from .teleop.receiver import TeleopReceiver
+
+            app.teleop_rx = TeleopReceiver(port=session.config.teleop_port,
+                                           token=session.config.teleop_token)
         app._attach(session)
         return app
 
@@ -114,6 +126,8 @@ class App:
             )
             self._maybe_nl_agent()
             self.recorder = None
+            if self.teleop_rx is not None:
+                session.loop.set_teleop_source(self.teleop_rx)
             self.panel = ControlPanel(self.server, self)
             self.direct_drag = install_direct_drag(self)
         name = session.scenario.name if session.scenario else "bare arm"
@@ -183,6 +197,8 @@ class App:
 
     def shutdown(self) -> None:
         self.stop_training()
+        if self.teleop_rx is not None:
+            self.teleop_rx.close()
         self._teardown()
 
     # -- recording -----------------------------------------------------------------
