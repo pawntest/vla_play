@@ -1,12 +1,20 @@
-"""viser GUI panel: every so101_tool capability, driven through an App session.
+"""viser GUI panel — redesigned for intuitive use.
 
-Folders: Scenario (pick/edit/save scenes), Status + e-stop, Joints, Cartesian,
-Record dataset, Scripted demos, Policy, Train, Natural language. All callbacks
-either enqueue Commands on the control loop or call App methods that spawn
-worker threads — nothing here blocks a viser callback.
+Layout:
+  - Always-visible header: a large colored STATE BANNER (what the robot is
+    doing right now), EMERGENCY STOP, a Reset button that only appears while
+    the e-stop is latched, and a pause button.
+  - Four tabs replace the old wall of folders:
+      🕹 操作   manual control (joints, cartesian gizmo/jog, direct drag, NL)
+      🎬 データ  dataset recording, scripted demos, remote teleop
+      🧠 学習   policy execution and training
+      🌍 シーン  scenario load/edit (objects, cameras, environment), save
 
-update(snap) is called from the render loop and refreshes readouts and the
-status strings of background tasks.
+Modes switch AUTOMATICALLY: any manual-control action drops the loop into
+RULE mode first (`_put_motion`), running a policy switches to POLICY,
+enabling teleop switches to TELEOP — the user never manages modes by hand.
+All callbacks only enqueue Commands or call App worker methods; nothing here
+blocks a viser callback. `update(snap)` is called from the render loop.
 """
 
 from __future__ import annotations
@@ -30,8 +38,19 @@ from ..scenario import (
     save_scenario,
 )
 
-_MODES = [m.value for m in Mode]
 _SCENARIO_DIRS = ("examples", "scenarios")
+
+# banner color / title / subtitle per mode
+_MODE_BANNER = {
+    Mode.IDLE: ("#64748b", "⬜ 待機中",
+                "スライダー・ギズモ・ドラッグ操作で自動的に「手動操作」へ切り替わります"),
+    Mode.RULE: ("#2563eb", "🕹 手動操作中", ""),
+    Mode.POLICY: ("#7c3aed", "🤖 AI ポリシー実行中", ""),
+    Mode.TELEOP: ("#059669", "🎮 テレオペ中", ""),
+    Mode.MIRROR: ("#d97706", "🪞 実機ミラー中", "実機を手で動かすと3Dが追従します(書き込みなし)"),
+}
+_CMD_JP = {"MoveJ": "関節移動", "MoveL": "直線移動(IK)", "JogTool": "ジョグ",
+           "SetGripper": "グリッパー", "Home": "ホーム復帰"}
 
 
 def _find_scenarios() -> list[str]:
@@ -39,6 +58,21 @@ def _find_scenarios() -> list[str]:
     for d in _SCENARIO_DIRS:
         found += sorted(str(p) for p in Path(d).glob("*.yaml"))
     return found
+
+
+def _banner(color: str, title: str, sub: str, badge: str = "") -> str:
+    badge_html = (
+        f'<span style="background:#dc2626;border-radius:999px;padding:1px 8px;'
+        f'font-size:0.72em;margin-left:8px;vertical-align:middle;">{badge}</span>'
+        if badge else ""
+    )
+    return (
+        f'<div style="border-radius:8px;padding:10px 12px;background:{color};'
+        f'color:#fff;line-height:1.4;">'
+        f'<div style="font-size:1.12em;font-weight:700;">{title}{badge_html}</div>'
+        f'<div style="font-size:0.82em;opacity:0.93;white-space:pre-line;">{sub}</div>'
+        f"</div>"
+    )
 
 
 class ControlPanel:
@@ -54,160 +88,98 @@ class ControlPanel:
         gui = server.gui
         scenario = app.scenario
 
-        # ---- Scenario: load / edit / save ------------------------------------
-        with gui.add_folder("Scenario", expand_by_default=scenario is None):
-            title = scenario.name if scenario else "bare arm (no physics scene)"
-            self._scene_md = gui.add_markdown(f"**{title}**\n\ntask: *{scenario.task if scenario else '-'}*")
-            options = ["(bare arm)"] + _find_scenarios()
-            current = scenario.source_path if scenario and scenario.source_path else "(bare arm)"
-            if current not in options:
-                options.append(current)
-            self._scene_dd = gui.add_dropdown("file", options=options, initial_value=current)
-            load_btn = gui.add_button("Load scenario")
-            load_btn.on_click(lambda _: self._load_selected_scenario())
-            if scenario is not None:
-                reset_btn = gui.add_button("Reset scene (randomize)")
-                reset_btn.on_click(lambda _: app.backend.reset(randomize=True))
-                self._task_input = gui.add_text("task", initial_value=scenario.task)
+        gui.configure_theme(control_layout="collapsible", control_width="large",
+                            brand_color=(37, 99, 235))
 
-                with gui.add_folder("Edit objects", expand_by_default=False):
-                    names = [o.name for o in scenario.objects] or ["-"]
-                    self._obj_dd = gui.add_dropdown("object", options=names,
-                                                    initial_value=names[0])
-                    rm_btn = gui.add_button("Remove selected")
-                    rm_btn.on_click(lambda _: self._remove_object())
-                    self._drag_cb = gui.add_checkbox("🖱 Drag objects (gizmos)",
-                                                     initial_value=False)
-                    self._drag_cb.on_update(lambda _: self._toggle_drag_gizmos())
-                    self._click_add_cb = gui.add_checkbox("➕ Click scene to add object",
-                                                          initial_value=False)
-                    self._click_add_cb.on_update(lambda _: self._toggle_click_add())
-                    self._new_name = gui.add_text("new name", initial_value="obj1")
-                    self._new_type = gui.add_dropdown(
-                        "type", options=["box", "sphere", "cylinder", "cloth"],
-                        initial_value="box",
-                    )
-                    self._new_size = gui.add_vector3(
-                        "size (m)", initial_value=(0.015, 0.015, 0.015), step=0.005
-                    )
-                    self._new_pos = gui.add_vector3(
-                        "position (m)", initial_value=(0.25, 0.0, 0.02), step=0.01
-                    )
-                    self._new_color = gui.add_rgb("color", initial_value=(220, 30, 30))
-                    self._new_mass = gui.add_number("mass (kg)", initial_value=0.03,
-                                                    min=0.001, max=2.0, step=0.01)
-                    self._new_noise = gui.add_slider(
-                        "pos noise ± (cm)", min=0.0, max=10.0, step=0.5, initial_value=4.0
-                    )
-                    add_btn = gui.add_button("Add object → rebuild scene")
-                    add_btn.on_click(lambda _: self._add_object())
-
-                with gui.add_folder("Cameras", expand_by_default=False):
-                    cam_names = [c.name for c in scenario.cameras] or ["-"]
-                    self._cam_dd = gui.add_dropdown("camera", options=cam_names,
-                                                    initial_value=cam_names[0])
-                    cam_rm = gui.add_button("Remove selected camera")
-                    cam_rm.on_click(lambda _: self._remove_camera())
-                    self._cam_name = gui.add_text("new name", initial_value="cam1")
-                    self._cam_attach = gui.add_dropdown(
-                        "attach to", options=["world"] + ATTACHABLE_BODIES,
-                        initial_value="world",
-                    )
-                    self._cam_pos = gui.add_vector3(
-                        "pos (m)", initial_value=(0.5, -0.3, 0.35), step=0.01
-                    )
-                    self._cam_lookat = gui.add_vector3(
-                        "look at (m)", initial_value=(0.25, 0.0, 0.05), step=0.01
-                    )
-                    self._cam_fovy = gui.add_slider("fovy (deg)", min=20, max=120, step=1,
-                                                    initial_value=58)
-                    cam_add = gui.add_button("Add camera → rebuild scene")
-                    cam_add.on_click(lambda _: self._add_camera())
-                    gui.add_markdown(
-                        "*attach to an arm body for wrist/tool cams; pos+lookat are then "
-                        "in that body's frame*"
-                    )
-
-                with gui.add_folder("Environment", expand_by_default=False):
-                    env = scenario.environment
-                    self._env_table = gui.add_checkbox("table", initial_value=env.table is not None)
-                    tbl = env.table or TableSpec()
-                    self._env_table_size = gui.add_vector2(
-                        "table size (m)", initial_value=tuple(tbl.size), step=0.05
-                    )
-                    self._env_table_rgb = gui.add_rgb(
-                        "table color", initial_value=tuple(int(c * 255) for c in tbl.rgba[:3])
-                    )
-                    self._env_checker = gui.add_checkbox("checker floor",
-                                                         initial_value=env.floor.checker)
-                    self._env_floor_rgb = gui.add_rgb(
-                        "floor color",
-                        initial_value=tuple(int(c * 255) for c in env.floor.rgba[:3]),
-                    )
-                    env_btn = gui.add_button("Apply environment → rebuild scene")
-                    env_btn.on_click(lambda _: self._apply_environment())
-
-                self._save_path = gui.add_text(
-                    "save as", initial_value=scenario.source_path or "scenarios/my_scene.yaml"
-                )
-                save_btn = gui.add_button("Save scenario YAML")
-                save_btn.on_click(lambda _: self._save_scenario())
-
-        # ---- Status / e-stop ---------------------------------------------------
-        with gui.add_folder("Status"):
-            self._mode_dd = gui.add_dropdown("Mode", options=_MODES, initial_value=Mode.IDLE.value)
-            self._status_md = gui.add_markdown("connecting…")
-            estop_btn = gui.add_button("EMERGENCY STOP", color="red")
-            reset_btn = gui.add_button("Reset e-stop")
-            stop_btn = gui.add_button("Stop motion")
-        self._mode_dd.on_update(lambda _: self._put(SetMode(mode=Mode(self._mode_dd.value))))
+        # =====================  header (always visible)  =====================
+        self._banner_html = gui.add_html(_banner("#64748b", "⬜ 接続中…", ""))
+        estop_btn = gui.add_button("🛑 非常停止 (EMERGENCY STOP)", color="red")
+        self._reset_estop_btn = gui.add_button("非常停止を解除する", color="orange",
+                                               visible=False)
+        stop_btn = gui.add_button("⏸ 停止して待機に戻る")
         estop_btn.on_click(lambda _: self._loop.estop())
-        reset_btn.on_click(lambda _: self._loop.reset_estop())
-        stop_btn.on_click(lambda _: self._put(Stop()))
+        self._reset_estop_btn.on_click(lambda _: self._loop.reset_estop())
+        stop_btn.on_click(lambda _: (self._put(Stop()),
+                                     self._put(SetMode(mode=Mode.IDLE))))
+        if app.backend is not None and app.backend.is_real:
+            mirror_btn = gui.add_button("🪞 ミラーモード(実機を手で動かす)")
+            mirror_btn.on_click(lambda _: self._put(SetMode(mode=Mode.MIRROR)))
 
-        # ---- Joints ---------------------------------------------------------------
-        with gui.add_folder("Joints (RULE)", expand_by_default=False):
-            self._speed = gui.add_slider("speed", min=0.1, max=1.0, step=0.05, initial_value=0.5)
+        # =============================  tabs  ================================
+        # (handles kept for cleanup_gui: viser's gui.reset() crashes on tab
+        #  groups — the group must be dismantled tab-first, group-second)
+        self._tab_group = gui.add_tab_group()
+        self._tabs = []
+
+        tab = self._tab_group.add_tab("🕹 操作")
+        self._tabs.append(tab)
+        with tab:
+            self._build_control_tab(gui, server)
+
+        tab = self._tab_group.add_tab("🎬 データ")
+        self._tabs.append(tab)
+        with tab:
+            self._build_data_tab(gui, app, scenario)
+
+        tab = self._tab_group.add_tab("🧠 学習")
+        self._tabs.append(tab)
+        with tab:
+            self._build_ai_tab(gui, app, scenario)
+
+        tab = self._tab_group.add_tab("🌍 シーン")
+        self._tabs.append(tab)
+        with tab:
+            self._build_scene_tab(gui, app, scenario)
+
+    # ------------------------------------------------------------------ tabs --
+
+    def _build_control_tab(self, gui, server) -> None:
+        gui.add_markdown("*どの操作も自動で「手動操作」モードに切り替わります*")
+        self._speed = gui.add_slider("速度", min=0.1, max=1.0, step=0.05, initial_value=0.5)
+
+        with gui.add_folder("関節 (スライダー)", expand_by_default=True):
             self._joint_sliders = [
                 gui.add_slider(name, min=float(ARM_LIMITS_LO[i]), max=float(ARM_LIMITS_HI[i]),
                                step=0.01, initial_value=0.0)
                 for i, name in enumerate(ARM_JOINTS)
             ]
-            self._gripper_slider = gui.add_slider("gripper", min=0.0, max=1.0, step=0.01,
-                                                  initial_value=0.0)
-            movej_btn = gui.add_button("Move to sliders")
-            home_btn = gui.add_button("Home")
+            self._gripper_slider = gui.add_slider("グリッパー (0閉↔1開)", min=0.0, max=1.0,
+                                                  step=0.01, initial_value=0.0)
+            movej_btn = gui.add_button("▶ この姿勢へ移動")
+            home_btn = gui.add_button("⌂ ホームへ戻る")
         movej_btn.on_click(
-            lambda _: self._put(
+            lambda _: self._put_motion(
                 MoveJ(q=np.array([s.value for s in self._joint_sliders]),
                       gripper=self._gripper_slider.value, speed=self._speed.value)
             )
         )
-        home_btn.on_click(lambda _: self._put(Home(speed=self._speed.value)))
+        home_btn.on_click(lambda _: self._put_motion(Home(speed=self._speed.value)))
 
-        # ---- Cartesian ---------------------------------------------------------------
-        with gui.add_folder("Cartesian (RULE)", expand_by_default=False):
-            self._direct_drag_cb = gui.add_checkbox("🖐 Direct drag (grab meshes)",
-                                                    initial_value=True)
+        with gui.add_folder("先端位置 (ギズモ / ジョグ)", expand_by_default=True):
+            self._direct_drag_cb = gui.add_checkbox(
+                "🖐 3Dモデルを直接ドラッグで操作", initial_value=True,
+                hint="物体やグリッパーを掴んでそのまま動かせます",
+            )
             self._direct_drag_cb.on_update(lambda _: self._set_direct_drag())
             self._gizmo = server.scene.add_transform_controls("/target", scale=0.15)
-            snap_btn = gui.add_button("Snap target to TCP")
-            go_pos_btn = gui.add_button("Go to target (position)")
-            go_pose_btn = gui.add_button("Go to target (pose)")
-            self._jog_step = gui.add_slider("jog step (cm)", min=0.5, max=10.0, step=0.5,
+            snap_btn = gui.add_button("◎ ターゲットを現在位置に合わせる")
+            go_pos_btn = gui.add_button("▶ ターゲットへ移動(位置)")
+            go_pose_btn = gui.add_button("▶ ターゲットへ移動(姿勢つき)")
+            self._jog_step = gui.add_slider("ジョグ幅 (cm)", min=0.5, max=10.0, step=0.5,
                                             initial_value=2.0)
             jog_btns = {}
             for axis in "XYZ":
-                jog_btns[f"+{axis}"] = gui.add_button(f"Jog +{axis} (tool)")
-                jog_btns[f"-{axis}"] = gui.add_button(f"Jog -{axis} (tool)")
+                jog_btns[f"+{axis}"] = gui.add_button(f"{axis}+ へジョグ")
+                jog_btns[f"-{axis}"] = gui.add_button(f"{axis}− へジョグ")
         snap_btn.on_click(lambda _: self._snap_gizmo_to_tcp())
         go_pos_btn.on_click(
-            lambda _: self._put(MoveL(position=np.array(self._gizmo.position), wxyz=None,
-                                      speed=self._speed.value))
+            lambda _: self._put_motion(MoveL(position=np.array(self._gizmo.position),
+                                             wxyz=None, speed=self._speed.value))
         )
         go_pose_btn.on_click(
-            lambda _: self._put(MoveL(position=np.array(self._gizmo.position),
-                                      wxyz=np.array(self._gizmo.wxyz), speed=self._speed.value))
+            lambda _: self._put_motion(MoveL(position=np.array(self._gizmo.position),
+                                             wxyz=np.array(self._gizmo.wxyz),
+                                             speed=self._speed.value))
         )
         for label, btn in jog_btns.items():
             sign = 1.0 if label[0] == "+" else -1.0
@@ -216,44 +188,35 @@ class ControlPanel:
             def _jog(_evt, sign=sign, axis=axis):
                 dpos = np.zeros(3)
                 dpos[axis] = sign * self._jog_step.value / 100.0
-                self._put(JogTool(dpos=dpos, frame="tool", speed=self._speed.value))
+                self._put_motion(JogTool(dpos=dpos, frame="tool", speed=self._speed.value))
 
             btn.on_click(_jog)
 
-        # ---- Remote teleop ---------------------------------------------------------------
-        if app.teleop_rx is not None:
-            rx = app.teleop_rx
-            with gui.add_folder("Remote teleop", expand_by_default=True):
-                self._teleop_md = gui.add_markdown("waiting…")
-                gui.add_markdown(
-                    "connect from your laptop:\n\n"
-                    f"```\nssh -L {rx.port}:localhost:{rx.port} <this-host>\n"
-                    f"so101-tool teleop-client --connect localhost:{rx.port} \\\n"
-                    f"    --token {rx.token} --port /dev/ttyACM0\n```"
-                )
-                teleop_on = gui.add_button("Enable TELEOP mode")
-                teleop_off = gui.add_button("Stop teleop (→ idle)")
-            teleop_on.on_click(lambda _: self._put(SetMode(mode=Mode.TELEOP)))
-            teleop_off.on_click(lambda _: self._put(SetMode(mode=Mode.IDLE)))
-        else:
-            self._teleop_md = None
+        if self._app.nl_agent is not None:
+            with gui.add_folder("💬 自然言語で操作", expand_by_default=True):
+                self._nl_input = gui.add_text("指示", initial_value="",
+                                              hint="例: グリッパーを5cm前に動かして")
+                self._nl_send = gui.add_button("送信")
+                self._nl_log = gui.add_markdown("")
+                self._nl_send.on_click(lambda _: self._send_nl())
 
-        # ---- Record dataset -------------------------------------------------------------
+    def _build_data_tab(self, gui, app, scenario) -> None:
         has_cameras = hasattr(app.backend, "get_camera_frames")
-        with gui.add_folder("Record dataset", expand_by_default=False):
+        default_repo = app.record_repo or (scenario.name if scenario else "my_dataset")
+        default_root = app.record_root or f"data/{default_repo}"
+
+        with gui.add_folder("🔴 デモ録画 (LeRobotDataset)", expand_by_default=True):
             if not has_cameras:
-                gui.add_markdown("*needs cameras — load a scenario (or real robot)*")
-            default_repo = app.record_repo or (scenario.name if scenario else "my_dataset")
-            default_root = app.record_root or f"data/{default_repo}"
-            self._rec_repo = gui.add_text("repo id", initial_value=default_repo)
-            self._rec_root = gui.add_text("local dir", initial_value=default_root)
+                gui.add_markdown("*カメラが必要です — シーンを読み込むか実機に接続してください*")
+            self._rec_repo = gui.add_text("データセット名", initial_value=default_repo)
+            self._rec_root = gui.add_text("保存先フォルダ", initial_value=default_root)
             self._rec_fps = gui.add_slider("fps", min=5, max=30, step=5,
                                            initial_value=app.record_fps)
-            self._rec_status = gui.add_markdown("idle")
-            rec_start = gui.add_button("● Start episode", color="red", disabled=not has_cameras)
-            rec_save = gui.add_button("■ Stop & save", disabled=not has_cameras)
-            rec_discard = gui.add_button("✕ Stop & discard", disabled=not has_cameras)
-            rec_close = gui.add_button("Close dataset (finalize)", disabled=not has_cameras)
+            self._rec_status = gui.add_markdown("待機中")
+            rec_start = gui.add_button("● エピソード開始", color="red", disabled=not has_cameras)
+            rec_save = gui.add_button("■ 停止して保存", disabled=not has_cameras)
+            rec_discard = gui.add_button("✕ 停止して破棄", disabled=not has_cameras)
+            rec_close = gui.add_button("データセットを閉じる(確定)", disabled=not has_cameras)
         rec_start.on_click(
             lambda _: app.start_recording(self._rec_repo.value, self._rec_root.value,
                                           int(self._rec_fps.value))
@@ -262,58 +225,85 @@ class ControlPanel:
         rec_discard.on_click(lambda _: app.recorder and app.recorder.stop(save=False))
         rec_close.on_click(lambda _: app.close_dataset())
 
-        # ---- Scripted demos -----------------------------------------------------------
-        with gui.add_folder("Scripted demos (auto-generate)", expand_by_default=False):
+        with gui.add_folder("⚙ 自動デモ生成(スクリプト)", expand_by_default=False):
             if scenario is None or not scenario.objects:
-                gui.add_markdown("*needs a scenario with an object*")
-            self._demo_eps = gui.add_number("episodes", initial_value=20, min=1, max=500, step=1)
-            self._demo_seed = gui.add_number("seed", initial_value=0, min=0, max=9999, step=1)
-            self._demo_status = gui.add_markdown("idle")
+                gui.add_markdown("*物体のあるシーンが必要です*")
+            self._demo_eps = gui.add_number("エピソード数", initial_value=20, min=1, max=500,
+                                            step=1)
+            self._demo_seed = gui.add_number("シード", initial_value=0, min=0, max=9999, step=1)
+            self._demo_status = gui.add_markdown("待機中")
             demo_btn = gui.add_button(
-                "Generate pick demos", disabled=scenario is None or not scenario.objects
+                "▶ ピックのデモを自動生成", disabled=scenario is None or not scenario.objects
             )
         demo_btn.on_click(
             lambda _: app.generate_demos(
                 self._rec_repo.value, self._rec_root.value,
-                int(self._demo_eps.value), int(self._rec_fps.value), int(self._demo_seed.value),
+                int(self._demo_eps.value), int(self._rec_fps.value),
+                int(self._demo_seed.value),
             )
         )
 
-        # ---- Policy ---------------------------------------------------------------------
-        with gui.add_folder("Policy (AI)", expand_by_default=False):
+        if app.teleop_rx is not None:
+            rx = app.teleop_rx
+            with gui.add_folder("🎮 リモートテレオペ", expand_by_default=True):
+                self._teleop_md = gui.add_markdown("接続待ち…")
+                gui.add_markdown(
+                    "手元のPCから接続:\n\n"
+                    f"```\nssh -L {rx.port}:localhost:{rx.port} <this-host>\n"
+                    f"so101-tool teleop-client --connect localhost:{rx.port} \\\n"
+                    f"    --token {rx.token} --port /dev/ttyACM0\n```"
+                )
+                teleop_on = gui.add_button("▶ テレオペ開始", color="green")
+                teleop_off = gui.add_button("⏸ テレオペ停止")
+            teleop_on.on_click(lambda _: self._put(SetMode(mode=Mode.TELEOP)))
+            teleop_off.on_click(lambda _: self._put(SetMode(mode=Mode.IDLE)))
+        else:
+            self._teleop_md = None
+            gui.add_markdown(
+                "*リモートテレオペは `--teleop` で起動すると使えます "
+                "([docs/ja/teleop_remote.md](https://github.com/pawntest/vla_play))*"
+            )
+
+    def _build_ai_tab(self, gui, app, scenario) -> None:
+        default_repo = app.record_repo or (scenario.name if scenario else "my_dataset")
+
+        with gui.add_folder("🤖 学習済みポリシーを実行", expand_by_default=True):
             self._policy_path = gui.add_text(
-                "checkpoint", initial_value=self._config.policy_path or
+                "チェックポイント", initial_value=self._config.policy_path or
                 "outputs/train/checkpoints/last/pretrained_model"
             )
             self._policy_task = gui.add_text(
-                "task", initial_value=self._config.policy_task or (scenario.task if scenario else "")
+                "タスク指示文", initial_value=self._config.policy_task
+                or (scenario.task if scenario else "")
             )
             self._policy_status = gui.add_markdown(app.policy_status)
-            pol_load = gui.add_button("Load & run policy")
-            pol_stop = gui.add_button("Stop policy (→ idle)")
+            pol_load = gui.add_button("▶ 読み込んで実行", color="violet")
+            pol_stop = gui.add_button("⏸ ポリシー停止")
         pol_load.on_click(
             lambda _: app.load_policy(self._policy_path.value, self._policy_task.value)
         )
         pol_stop.on_click(lambda _: app.stop_policy())
 
-        # ---- Train -----------------------------------------------------------------------
-        with gui.add_folder("Train", expand_by_default=False):
-            self._train_dataset = gui.add_text("dataset (dir or hub id)",
+        with gui.add_folder("🎓 学習 (lerobot-train)", expand_by_default=False):
+            self._train_dataset = gui.add_text("データセット (フォルダ/Hub ID)",
                                                initial_value=f"data/{default_repo}")
-            self._train_policy = gui.add_dropdown("policy", options=["act", "smolvla", "diffusion"],
+            self._train_policy = gui.add_dropdown("ポリシー種別",
+                                                  options=["act", "smolvla", "diffusion"],
                                                   initial_value="act")
-            self._train_steps = gui.add_number("steps", initial_value=20000, min=1,
+            self._train_steps = gui.add_number("ステップ数", initial_value=20000, min=1,
                                                max=1_000_000, step=1000)
-            self._train_batch = gui.add_number("batch size", initial_value=8, min=1, max=256, step=1)
-            self._train_device = gui.add_dropdown("device", options=["auto", "cuda", "mps", "cpu"],
+            self._train_batch = gui.add_number("バッチサイズ", initial_value=8, min=1,
+                                               max=256, step=1)
+            self._train_device = gui.add_dropdown("デバイス",
+                                                  options=["auto", "cuda", "mps", "cpu"],
                                                   initial_value="auto")
-            self._train_out = gui.add_text("output dir", initial_value="outputs/train")
-            self._train_extra = gui.add_text("extra args", initial_value="")
-            self._train_status = gui.add_markdown("idle")
-            train_btn = gui.add_button("Start training", color="green")
-            train_stop = gui.add_button("Stop training")
-            self._colab_repo = gui.add_text("HF dataset repo (for Colab)", initial_value="")
-            colab_btn = gui.add_button("Export Colab notebook (free GPU)")
+            self._train_out = gui.add_text("出力先", initial_value="outputs/train")
+            self._train_extra = gui.add_text("追加引数", initial_value="")
+            self._train_status = gui.add_markdown("待機中")
+            train_btn = gui.add_button("▶ 学習開始", color="green")
+            train_stop = gui.add_button("⏹ 学習停止")
+            self._colab_repo = gui.add_text("HFデータセットrepo (Colab用)", initial_value="")
+            colab_btn = gui.add_button("📓 Colabノートブックを書き出す(無料GPU)")
         train_btn.on_click(
             lambda _: app.start_training(
                 self._train_dataset.value, self._train_policy.value,
@@ -325,17 +315,114 @@ class ControlPanel:
         colab_btn.on_click(
             lambda _: app.emit_colab(
                 self._colab_repo.value, self._train_policy.value,
-                int(self._train_steps.value), int(self._train_batch.value), "train_colab.ipynb",
+                int(self._train_steps.value), int(self._train_batch.value),
+                "train_colab.ipynb",
             )
         )
 
-        # ---- Natural language -----------------------------------------------------------
-        if app.nl_agent is not None:
-            with gui.add_folder("Natural language", expand_by_default=False):
-                self._nl_input = gui.add_text("command", initial_value="")
-                self._nl_send = gui.add_button("Send")
-                self._nl_log = gui.add_markdown("")
-                self._nl_send.on_click(lambda _: self._send_nl())
+    def _build_scene_tab(self, gui, app, scenario) -> None:
+        title = scenario.name if scenario else "素のアーム(物理シーンなし)"
+        self._scene_md = gui.add_markdown(
+            f"**{title}**\n\nタスク: *{scenario.task if scenario else '-'}*"
+        )
+        options = ["(bare arm)"] + _find_scenarios()
+        current = scenario.source_path if scenario and scenario.source_path else "(bare arm)"
+        if current not in options:
+            options.append(current)
+        self._scene_dd = gui.add_dropdown("シーンファイル", options=options,
+                                          initial_value=current)
+        load_btn = gui.add_button("📂 シーンを読み込む")
+        load_btn.on_click(lambda _: self._load_selected_scenario())
+        if scenario is None:
+            return
+
+        reset_btn = gui.add_button("🎲 配置をランダムにリセット")
+        reset_btn.on_click(lambda _: app.backend.reset(randomize=True))
+        self._task_input = gui.add_text("タスク指示文", initial_value=scenario.task)
+
+        with gui.add_folder("📦 物体の編集", expand_by_default=False):
+            names = [o.name for o in scenario.objects] or ["-"]
+            self._obj_dd = gui.add_dropdown("物体", options=names, initial_value=names[0])
+            rm_btn = gui.add_button("選択した物体を削除")
+            rm_btn.on_click(lambda _: self._remove_object())
+            self._drag_cb = gui.add_checkbox("🖱 配置ギズモを表示(ドラッグで移動)",
+                                             initial_value=False)
+            self._drag_cb.on_update(lambda _: self._toggle_drag_gizmos())
+            self._click_add_cb = gui.add_checkbox("➕ シーンをクリックした場所に追加",
+                                                  initial_value=False)
+            self._click_add_cb.on_update(lambda _: self._toggle_click_add())
+            self._new_name = gui.add_text("名前", initial_value="obj1")
+            self._new_type = gui.add_dropdown(
+                "種類", options=["box", "sphere", "cylinder", "cloth"], initial_value="box"
+            )
+            self._new_size = gui.add_vector3("サイズ (m)",
+                                             initial_value=(0.015, 0.015, 0.015), step=0.005)
+            self._new_pos = gui.add_vector3("位置 (m)", initial_value=(0.25, 0.0, 0.02),
+                                            step=0.01)
+            self._new_color = gui.add_rgb("色", initial_value=(220, 30, 30))
+            self._new_mass = gui.add_number("質量 (kg)", initial_value=0.03, min=0.001,
+                                            max=2.0, step=0.01)
+            self._new_noise = gui.add_slider("位置ランダム幅 ± (cm)", min=0.0, max=10.0,
+                                             step=0.5, initial_value=4.0)
+            add_btn = gui.add_button("➕ 物体を追加(シーン再構築)")
+            add_btn.on_click(lambda _: self._add_object())
+
+        with gui.add_folder("📷 カメラの編集", expand_by_default=False):
+            cam_names = [c.name for c in scenario.cameras] or ["-"]
+            self._cam_dd = gui.add_dropdown("カメラ", options=cam_names,
+                                            initial_value=cam_names[0])
+            cam_rm = gui.add_button("選択したカメラを削除")
+            cam_rm.on_click(lambda _: self._remove_camera())
+            self._cam_name = gui.add_text("名前", initial_value="cam1")
+            self._cam_attach = gui.add_dropdown(
+                "取り付け先", options=["world"] + ATTACHABLE_BODIES, initial_value="world",
+                hint="worldは固定カメラ。アーム部位を選ぶと一緒に動きます(座標はその部位基準)",
+            )
+            self._cam_pos = gui.add_vector3("位置 (m)", initial_value=(0.5, -0.3, 0.35),
+                                            step=0.01)
+            self._cam_lookat = gui.add_vector3("注視点 (m)", initial_value=(0.25, 0.0, 0.05),
+                                               step=0.01)
+            self._cam_fovy = gui.add_slider("画角 (deg)", min=20, max=120, step=1,
+                                            initial_value=58)
+            cam_add = gui.add_button("➕ カメラを追加(シーン再構築)")
+            cam_add.on_click(lambda _: self._add_camera())
+
+        with gui.add_folder("🏞 環境の編集", expand_by_default=False):
+            env = scenario.environment
+            self._env_table = gui.add_checkbox("テーブル", initial_value=env.table is not None)
+            tbl = env.table or TableSpec()
+            self._env_table_size = gui.add_vector2("テーブルサイズ (m)",
+                                                   initial_value=tuple(tbl.size), step=0.05)
+            self._env_table_rgb = gui.add_rgb(
+                "テーブル色", initial_value=tuple(int(c * 255) for c in tbl.rgba[:3])
+            )
+            self._env_checker = gui.add_checkbox("チェッカー床", initial_value=env.floor.checker)
+            self._env_floor_rgb = gui.add_rgb(
+                "床の色", initial_value=tuple(int(c * 255) for c in env.floor.rgba[:3])
+            )
+            env_btn = gui.add_button("✔ 環境を適用(シーン再構築)")
+            env_btn.on_click(lambda _: self._apply_environment())
+
+        self._save_path = gui.add_text(
+            "保存先", initial_value=scenario.source_path or "scenarios/my_scene.yaml"
+        )
+        save_btn = gui.add_button("💾 シーンをYAMLに保存")
+        save_btn.on_click(lambda _: self._save_scenario())
+
+    # ------------------------------------------------------------- lifecycle --
+
+    def cleanup_gui(self) -> None:
+        """Dismantle the tab group tab-by-tab BEFORE gui.reset() — viser's
+        reset removes the group first and then chokes updating tab labels."""
+        for tab in getattr(self, "_tabs", []):
+            try:
+                tab.remove()
+            except Exception:
+                pass
+        try:
+            self._tab_group.remove()
+        except Exception:
+            pass
 
     def cleanup_scene(self) -> None:
         """Remove scene nodes owned by this panel (called before a rebuild)."""
@@ -350,10 +437,17 @@ class ControlPanel:
         except Exception:
             pass
 
-    # -- helpers ------------------------------------------------------------------
+    # --------------------------------------------------------------- helpers --
 
     def _put(self, cmd) -> None:
         self._loop.commands.put(cmd)
+
+    def _put_motion(self, cmd) -> None:
+        """Enqueue a motion primitive, auto-switching to RULE mode first."""
+        snap = self._loop.snapshot()
+        if snap is None or snap.mode is not Mode.RULE:
+            self._put(SetMode(mode=Mode.RULE))
+        self._put(cmd)
 
     def _set_direct_drag(self) -> None:
         if self._app.direct_drag is not None:
@@ -503,37 +597,68 @@ class ControlPanel:
         self._nl_busy = True
         self._nl_send.disabled = True
         self._nl_input.value = ""
-        self._nl_log.content += f"\n\n**you:** {text}"
+        self._nl_log.content += f"\n\n**あなた:** {text}"
 
         def worker():
             try:
                 reply = self._app.nl_agent.handle(text)
             except Exception as exc:  # never crash the GUI thread
                 reply = f"error: {exc}"
-            self._nl_log.content += f"\n\n**robot:** {reply}"
+            self._nl_log.content += f"\n\n**ロボット:** {reply}"
             self._nl_busy = False
             self._nl_send.disabled = False
 
         threading.Thread(target=worker, daemon=True, name="so101-nl").start()
 
-    # -- render-loop hook --------------------------------------------------------------
+    # ------------------------------------------------------- render-loop hook --
+
+    def _banner_state(self, snap: LoopSnapshot) -> str:
+        app = self._app
+        tcp = np.round(snap.tcp_position * 1000).astype(int)
+        info = (f"TCP: {tcp[0]}, {tcp[1]}, {tcp[2]} mm ・ グリッパー {snap.gripper:.2f} ・ "
+                f"{'実機' if snap.backend_is_real else 'シム'}")
+        badge = "🔴 REC" if (app.recorder is not None and app.recorder.recording) else ""
+
+        if snap.estop:
+            return _banner("#dc2626", "🛑 非常停止中",
+                           "「非常停止を解除する」を押すまで一切動きません\n" + info, badge)
+        color, title, sub = _MODE_BANNER[snap.mode]
+        if snap.mode is Mode.RULE:
+            act = _CMD_JP.get(snap.active_command or "", None)
+            sub = f"実行中: {act}…" if act else "指示待ち(スライダー・ギズモ・ドラッグ・自然言語)"
+        elif snap.mode is Mode.POLICY:
+            sub = app.policy_status
+        elif snap.mode is Mode.TELEOP and app.teleop_rx is not None:
+            sub = ("🟢 リーダーアームのストリームに追従中" if app.teleop_rx.fresh
+                   else "⚪ ストリーム待ち(接続が切れると保持します)")
+        if snap.error:
+            sub += f"\n⚠ {snap.error}"
+        return _banner(color, title, sub + "\n" + info, badge)
 
     def update(self, snap: LoopSnapshot | None) -> None:
         self._tick += 1
-        if snap is None or self._tick % 6:  # ~5 Hz text updates at 30 Hz render
+        if snap is None or self._tick % 6:  # ~5 Hz updates at 30 Hz render
             return
         app = self._app
+
+        html = self._banner_state(snap)
+        if self._banner_html.content != html:
+            self._banner_html.content = html
+        if self._reset_estop_btn.visible != snap.estop:
+            self._reset_estop_btn.visible = snap.estop
+
         if self._teleop_md is not None and app.teleop_rx is not None:
             rx = app.teleop_rx
-            live = "🟢 streaming" if rx.fresh else f"⚪ {rx.status}"
-            tcontent = f"{live} — 127.0.0.1:{rx.port} (token-protected, SSH tunnel only)"
+            live = "🟢 接続中(ストリーム受信)" if rx.fresh else f"⚪ {rx.status}"
+            tcontent = f"{live} — 127.0.0.1:{rx.port}(トークン保護・SSHトンネル専用)"
             if self._teleop_md.content != tcontent:
                 self._teleop_md.content = tcontent
+
         if app.recorder is not None:
             marker = "🔴 " if app.recorder.recording else ""
-            content = f"{marker}{app.recorder.status} — episodes saved: {app.recorder.episodes}"
+            content = f"{marker}{app.recorder.status} — 保存済みエピソード: {app.recorder.episodes}"
         else:
-            content = "idle"
+            content = "待機中"
         if self._rec_status.content != content:
             self._rec_status.content = content
         for handle, text in (
@@ -544,23 +669,6 @@ class ControlPanel:
             if handle.content != text:
                 handle.content = text
 
-        if self._mode_dd.value != snap.mode.value:
-            self._mode_dd.value = snap.mode.value
-        joints = " ".join(f"{v:+.2f}" for v in snap.q)
-        tcp = np.round(snap.tcp_position * 1000).astype(int)
-        lines = [
-            f"backend: **{'real' if snap.backend_is_real else 'sim'}** — {app.scene_status}",
-            f"q (rad): `{joints}`  grip: `{snap.gripper:.2f}`",
-            f"TCP (mm): `{tcp[0]} {tcp[1]} {tcp[2]}`",
-            f"active: `{snap.active_command or '-'}`",
-        ]
-        if snap.estop:
-            lines.insert(0, "## 🛑 E-STOP LATCHED")
-        if snap.error:
-            lines.append(f"last error: `{snap.error}`")
-        status = "\n\n".join(lines)
-        if self._status_md.content != status:
-            self._status_md.content = status
         if snap.mode in (Mode.IDLE, Mode.MIRROR):
             for s, v in zip(self._joint_sliders, snap.q):
                 s.value = float(np.clip(v, s.min, s.max))

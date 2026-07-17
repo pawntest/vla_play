@@ -117,6 +117,7 @@ class App:
             self.session = session
             if self.panel is not None:
                 self.panel.cleanup_scene()
+                self.panel.cleanup_gui()
             if self.view is not None:
                 self.view.remove()
             self.server.gui.reset()
