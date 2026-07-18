@@ -1,17 +1,15 @@
-# Scenario YAML reference
+# シナリオ YAML リファレンス
 
-日本語版: [docs/ja/scenario_reference.md](ja/scenario_reference.md)
-
-**日本語**: シーン(環境・物体・カメラ・タスク)を定義するYAMLの完全リファレンスです。
-座標系はアーム基部が原点、+X前方、+Z上、単位はメートル/ラジアン。GUIの
+シーン(環境・物体・カメラ・タスク)を定義するYAMLの完全リファレンスです。
+座標系はアーム基部が原点、+X前方、+Z上、単位はメートル/ラジアンです。GUIの
 Scenario→Edit objects/Cameras/Environment パネルは同じスキーマを対話的に編集し、
 「Save scenario YAML」でこの形式に書き出します。
 
-Everything below can also be edited interactively in the GUI (drag gizmos, click-to-add,
-camera/environment editors) and saved back to YAML. Loader/builder:
-`so101_tool.scenario.load_scenario / build_model` (`api.py` re-exports them).
+以下の内容はすべてGUI上でも対話的に編集できます(ギズモのドラッグ、クリックでの
+追加、カメラ/環境エディタ)。編集結果はYAMLへ書き戻せます。ローダー/ビルダー:
+`so101_tool.scenario.load_scenario / build_model`(`api.py` が再エクスポートしています)。
 
-## Top level
+## トップレベル
 
 | key | type | default | meaning |
 | --- | --- | --- | --- |
@@ -35,11 +33,13 @@ environment:
   light_diffuse: 0.8
 ```
 
-- `floor.checker: true` renders a two-tone checker (second color `rgba2`, default =
-  darkened `rgba`). With a `table`, the floor drops 0.4 m below the tabletop.
-- `table`: a static slab whose TOP surface is at `height` (the arm base plane is z=0);
-  `pos` is the tabletop center [x, y].
-- `props`: static `ObjectSpec`s (same fields as objects, no free joint, never randomized).
+- `floor.checker: true` にすると2色のチェッカー柄になります(2色目は `rgba2`、
+  デフォルトは `rgba` を暗くした色)。`table` がある場合、床はテーブル天板より
+  0.4 m 下に配置されます。
+- `table`: 静的な板で、上面が `height` の高さになります(アーム基部の平面は
+  z=0)。`pos` はテーブル天板中心の [x, y] です。
+- `props`: 静的な `ObjectSpec`(objects と同じフィールドを持ちますが自由関節を
+  持たず、ランダム化もされません)。
 
 ## `objects[]`
 
@@ -58,10 +58,11 @@ environment:
 | `yaw_range` | [rad] | null | per-reset uniform yaw (rigid objects only) |
 | `cloth` | map | see below | `type: cloth` physics parameters |
 
-### Cloth (`type: cloth`)
+### 布(`type: cloth`)
 
-MuJoCo ≥3.1 native deformable shells (`flexcomp` + built-in elasticity — no plugin).
-Rendered in the browser view, in every scenario camera, and therefore in datasets.
+MuJoCo 3.1 以降がネイティブでサポートする変形可能なシェル(`flexcomp` +
+組み込みの弾性モデル — プラグイン不要)です。ブラウザのビュー、すべてのシナリオ
+カメラ、したがってデータセットにもレンダリングされます。
 
 ```yaml
 cloth: {resolution: 9, young: 3.0e4, poisson: 0.1, thickness: 0.01, damping: 0.01}
@@ -75,8 +76,9 @@ cloth: {resolution: 9, young: 3.0e4, poisson: 0.1, thickness: 0.01, damping: 0.0
 | `thickness` | 0.01 | 0.002–0.02 | shell thickness, m |
 | `damping` | 0.01 | 0.001–0.1 | vertex velocity damping |
 
-Higher `resolution` means finer folds but slower physics (cost grows ~quadratically).
-`pos_noise` translates the whole cloth per reset; `yaw_range` is ignored for cloth.
+`resolution` を上げるほど折り目は細かくなりますが物理演算は遅くなります
+(コストはおおよそ2乗で増加します)。`pos_noise` はリセットのたびに布全体を
+平行移動させます。`yaw_range` は布には適用されません(無視されます)。
 
 ## `cameras[]`
 
@@ -88,27 +90,34 @@ cameras:
      lookat: [0.02, 0, -0.22], fovy: 75}                                        # eye-in-hand
 ```
 
-- Any number of cameras; every one becomes an `observation.images.<name>` dataset feature
-  and a policy input. Resolution is global (`--render-width/--render-height`).
-- `attach_to`: one of `base, shoulder, upper_arm, lower_arm, wrist, gripper` — `pos` and
-  `lookat` are then in that body's frame and the camera moves with the arm. For the
-  gripper, the jaw points along −z of the body frame.
-- A name that already exists in the arm MJCF (e.g. `wrist_cam`) reuses that camera.
+- カメラはいくつでも追加できます。それぞれが `observation.images.<name>`
+  というデータセットの特徴量になり、ポリシーの入力にもなります。解像度はグローバル
+  設定(`--render-width/--render-height`)です。
+- `attach_to`: `base, shoulder, upper_arm, lower_arm, wrist, gripper` のいずれか。
+  指定するとそのボディのフレーム内で `pos` と `lookat` が解釈され、カメラはアームと
+  一緒に動きます。グリッパーの場合、顎(jaw)はそのボディフレームの −z 方向を
+  向きます。
+- アームのMJCFに既に存在する名前(例: `wrist_cam`)を指定すると、そのカメラを
+  そのまま再利用します。
 
-## Worked examples
+## 実例
 
-1. **Minimal pick scene** — [examples/pick_cube.yaml](../examples/pick_cube.yaml):
-   one randomized cube, three cameras.
-2. **Cluttered tabletop** — table + props + cloth + rigid objects + 5 cameras (2 attached):
-   [examples/tabletop_cloth.yaml](../examples/tabletop_cloth.yaml).
-3. **Cloth-only scene** (folding-style tasks): keep a single `type: cloth` object and
-   record teleoperated demos through the GUI; scripted pick demos need a rigid first object.
+1. **最小構成のピックシーン** — [examples/pick_cube.yaml](../examples/pick_cube.yaml):
+   ランダム化された立方体1個、カメラ3台。
+2. **雑然としたテーブル上** — テーブル + props + 布 + 剛体物体 + カメラ5台
+   (うち2台はアーム取付):
+   [examples/tabletop_cloth.yaml](../examples/tabletop_cloth.yaml)。
+3. **布のみのシーン**(折りたたみ系タスク向け): `type: cloth` の物体を1つだけ
+   置き、GUIでテレオペのデモを記録します。スクリプトによるピックデモには
+   剛体の物体が最低1つ必要です。
 
-## Other robots (extension point)
+## 他のロボットへの対応(拡張ポイント)
 
-The scene builder composes around any MuJoCo arm model: `build_model(scenario, mjcf_path=...)`
-and `Kinematics(mjcf_path=...)` accept a different MJCF. Current assumptions that a port
-must satisfy: 6 actuated position servos with the arm joints first in qpos, a `gripperframe`
-TCP site, and lerobot-style `<motor>.pos` naming for real-robot transfer. These are data
-conventions (`config.py`), not hard-coded logic — porting a different arm means swapping the
-MJCF + updating `ARM_JOINTS`/limits in one place.
+シーンビルダーは任意のMuJoCoアームモデルを中心に構成されています:
+`build_model(scenario, mjcf_path=...)` と `Kinematics(mjcf_path=...)` は別の
+MJCFを受け付けます。移植時に満たす必要がある現状の前提は、qpos内でアーム関節が
+先頭に来る形で6個の位置サーボアクチュエータがあること、`gripperframe` という
+TCPサイトがあること、実機転送のために lerobot 形式の `<motor>.pos` という
+命名規則に従っていることです。これらはデータ上の規約であり(`config.py`)、
+ハードコードされたロジックではありません。別のアームへの移植は、MJCFを差し替え、
+`ARM_JOINTS`/リミットを1箇所で更新するだけで済みます。

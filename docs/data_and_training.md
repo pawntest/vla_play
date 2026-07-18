@@ -1,30 +1,30 @@
-# Data collection & training: the imitation-learning workflow
+# データ収集と学習: 模倣学習のワークフロー
 
-日本語版: [docs/ja/data_and_training.md](ja/data_and_training.md)
+このページでは一連の流れを最初から最後まで説明します。**シーンを定義する →
+デモンストレーションを記録する → ポリシーを学習する(ローカルまたは無料の
+クラウドGPU) → アームで実行する**。実機のステップより前は、ハードウェアが
+一切なくても動作します。
 
-This page walks the full loop end to end: **define a scene → record demonstrations →
-train a policy (locally or on a free cloud GPU) → run it on the arm**. Everything up to
-the real-robot steps works with zero hardware.
+学習のフロントエンドは `src/so101_tool/training.py` にあり、lerobot 標準の
+`lerobot-train` エントリーポイントを起動します(lerobot >= 0.5.1、
+Python >= 3.12)。そのため、生成されるチェックポイントはどこでも使える通常の
+LeRobot ポリシーです。
 
-The training front-end lives in `src/so101_tool/training.py`; it drives lerobot's
-standard `lerobot-train` entry point (lerobot >= 0.5.1, Python >= 3.12), so checkpoints
-are plain LeRobot policies usable anywhere.
+## 0. 環境まとめ
 
-## 0. Environments at a glance
+インストールは [README のインストール](../README.md#インストール) を参照してください。
+対応関係: シムでの収集 = `[dev]`、実機での収集 = `[real]`
+([hardware.md](hardware.md) も参照)、ローカル学習 = `[policy]`、
+クラウド学習 = ブラウザ(Google Colab、無料GPU)+ HuggingFace アカウントのみ。
 
-| Step | Needs |
-| --- | --- |
-| Scenario + sim recording | `pip install -e ".[dev]"` (Python >= 3.10) |
-| Real-robot recording | `pip install -e ".[real]"` (Python >= 3.12), see [hardware.md](hardware.md) |
-| Local training | `pip install -e ".[policy]"` (Python >= 3.12, pulls torch) |
-| Cloud training | a browser (Google Colab, free GPU) + an HF account |
+## 1. シナリオを定義する
 
-## 1. Define a scenario
-
-A scenario is a small YAML file describing the objects, cameras and task around the arm.
-Start from [`examples/pick_cube.yaml`](../examples/pick_cube.yaml); the full schema
-(box/sphere/cylinder/mesh objects, per-reset randomization, camera placement) is in the
-module docstring of [`src/so101_tool/scenario.py`](../src/so101_tool/scenario.py):
+シナリオとは、アームの周りにある物体・カメラ・タスクを記述する小さなYAML
+ファイルです。まずは [`examples/pick_cube.yaml`](../examples/pick_cube.yaml)
+から始めてください。完全なスキーマ(box/sphere/cylinder/mesh オブジェクト、
+リセットごとのランダム化、カメラ配置)は
+[`src/so101_tool/scenario.py`](../src/so101_tool/scenario.py)
+のモジュールdocstringにあります。
 
 ```yaml
 name: pick_cube
@@ -41,53 +41,53 @@ cameras:
   - {name: top,   pos: [0.25, 0.0, 0.7], lookat: [0.25, 0.0, 0.0], fovy: 58}
 ```
 
-The `task` string and the camera names become the language instruction and the
-observation keys of the recorded dataset, so choose them before you start recording.
+`task` の文字列とカメラ名は、記録されたデータセットの言語指示・観測キーに
+そのままなります。記録を始める前に決めておきましょう。
 
-## 2. Collect demonstrations
+## 2. デモンストレーションを収集する
 
-Demonstrations are saved in the standard **LeRobotDataset** format (a directory with
-`meta/`, `data/`, `videos/`), so they train and share exactly like any other LeRobot
-dataset.
+デモンストレーションは標準の **LeRobotDataset** 形式(`meta/`, `data/`,
+`videos/` を含むディレクトリ)で保存されます。そのため、他のLeRobot
+データセットとまったく同じように学習・共有できます。
 
-**In simulation, by hand (GUI recording):** run the scenario with recording enabled and
-demonstrate the task with the Cartesian gizmo / jog buttons; each episode is saved with
-the scenario cameras rendered as video streams:
+**シミュレーション上で、手動で(GUI記録):** 記録を有効にしてシナリオを実行し、
+Cartesian ギズモ / jog ボタンでタスクをデモンストレーションします。各エピソードは
+シナリオのカメラを映像ストリームとしてレンダリングした状態で保存されます。
 
 ```bash
 so101-tool run --scenario examples/pick_cube.yaml --record pick_cube --record-root data/pick_cube
 ```
 
-**In simulation, automatically (scripted demos):** for pick-and-place style tasks the
-tool can generate demonstrations by planning with the simulator's ground-truth object
-poses — useful to bootstrap a dataset in minutes:
+**シミュレーション上で、自動で(スクリプトによるデモ):** ピック&プレース系の
+タスクであれば、シミュレータが持つ物体の正解姿勢を使ってプランニングすることで
+デモを自動生成できます。数分でデータセットの土台を作るのに便利です。
 
 ```bash
 so101-tool scripted-demos --scenario examples/pick_cube.yaml \
     --episodes 50 --dataset pick_cube --root data/pick_cube
 ```
 
-(Both commands above are part of the recording pipeline currently being finalized in
-`so101_tool/data`; flags may still move slightly.)
+(上記の2コマンドはいずれも `so101_tool/data` で現在仕上げが進められている
+記録パイプラインの一部です。フラグは今後わずかに変わる可能性があります。)
 
-**On the real robot:** connect the arm and cameras (see [hardware.md](hardware.md)) and
-record with the real backend, or use lerobot's own `lerobot-record` teleop recorder —
-the resulting dataset is the same format and trains identically.
+**実機ロボット上で:** アームとカメラを接続し([hardware.md](hardware.md)参照)、
+実機バックエンドで記録するか、lerobot 自身の `lerobot-record` テレオペ記録機能を
+使ってください。生成されるデータセットは同じ形式で、まったく同様に学習できます。
 
-Aim for **30–50+ episodes** with varied object positions (that's what `pos_noise` /
-`yaw_range` in the scenario are for). Fewer than ~20 episodes rarely produces a usable
-ACT policy.
+物体の位置にばらつきを持たせながら **30〜50エピソード以上**を目指してください
+(シナリオの `pos_noise` / `yaw_range` はそのためにあります)。エピソード数が
+約20を下回ると、使えるACTポリシーが得られることはほとんどありません。
 
-## 3. Train locally
+## 3. ローカルで学習する
 
 ```bash
 pip install -e ".[policy]"     # Python >= 3.12
 so101-tool train --dataset data/pick_cube --policy act
 ```
 
-This shells out to `lerobot-train` with sensible defaults (20k steps, batch size 8,
-wandb off, device auto-detected: cuda → mps → cpu). Useful flags, mirroring
-`TrainArgs` in `training.py`:
+これは妥当なデフォルト値(2万ステップ、バッチサイズ8、wandbオフ、デバイスは
+自動検出: cuda → mps → cpu)で `lerobot-train` を呼び出します。`training.py` の
+`TrainArgs` に対応する有用なフラグは次の通りです。
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
@@ -101,17 +101,18 @@ wandb off, device auto-detected: cuda → mps → cpu). Useful flags, mirroring
 | `--dataset-root DIR` | — | explicit local dataset directory (`--dataset` is then the repo_id) |
 | `--extra` | — | raw passthrough to `lerobot-train` (e.g. `--extra "--save_freq=1000"`) |
 
-Anything not covered by a flag can be passed verbatim through `--extra` — the full
-option surface is `lerobot-train --help`.
+フラグでカバーされていないものは、すべて `--extra` を通してそのまま渡せます。
+利用可能なオプションの全体像は `lerobot-train --help` で確認できます。
 
-Note: ACT at 20k steps is an overnight job on CPU but ~1–2 h on a modest GPU. If you
-don't have a local GPU, use the cloud path below.
+補足: ACTを2万ステップ学習させるのはCPUでは一晩仕事ですが、そこそこのGPUなら
+約1〜2時間です。ローカルにGPUがない場合は下記のクラウド手順を使ってください。
 
-## 4. Train in the cloud (free GPU)
+## 4. クラウドで学習する(無料GPU)
 
-**Google Colab (recommended, free T4 GPU):** one command pushes your local dataset to
-the Hugging Face hub (cloud machines can't see your disk — set `HF_TOKEN` to a *write*
-token first) and emits a ready-to-run notebook:
+**Google Colab(推奨、無料のT4 GPU):** 1コマンドでローカルのデータセットを
+Hugging Face hub にプッシュし(クラウドマシンからはローカルディスクが見えないため、
+まず `HF_TOKEN` に *write* 権限のトークンを設定してください)、すぐに実行できる
+notebookを生成します。
 
 ```bash
 export HF_TOKEN=hf_...
@@ -120,20 +121,20 @@ so101-tool train --dataset data/pick_cube --policy act \
     --emit-colab train_pick_cube.ipynb
 ```
 
-Already pushed? Skip the upload and just emit the notebook:
+すでにプッシュ済みの場合は、アップロードを飛ばしてnotebookだけ生成できます。
 
 ```bash
 so101-tool train --dataset your-hf-user/so101-pick-cube --policy act \
     --emit-colab train_pick_cube.ipynb
 ```
 
-The notebook installs lerobot, logs you into HF, runs the *exact same*
-`lerobot-train` command you would run locally (device pinned to `cuda`), and pushes the
-trained checkpoint back to the hub. Remember to select *Runtime → Change runtime type →
-T4 GPU* before running.
+このnotebookはlerobotをインストールし、HFにログインし、ローカルで実行するのと
+*まったく同じ* `lerobot-train` コマンドを実行し(デバイスは `cuda` に固定)、
+学習済みチェックポイントをhubへプッシュし返します。実行前に *Runtime →
+Change runtime type → T4 GPU* を選択するのを忘れないでください。
 
-**Any other GPU box** (rented server, lab machine, HF Jobs): the tool adds nothing
-machine-specific, so the same two lines work anywhere:
+**その他のGPUマシン**(レンタルサーバー、研究室のマシン、HF Jobsなど): 本ツールは
+マシン固有の処理を何も追加しないため、どこでも同じ2行で動きます。
 
 ```bash
 pip install "so101-tool[policy]"     # Python >= 3.12
@@ -141,10 +142,11 @@ so101-tool train --dataset your-hf-user/so101-pick-cube --policy act \
     --push-to-hub --hub-repo your-hf-user/so101-act-pick-cube
 ```
 
-## 5. Run the trained policy
+## 5. 学習済みポリシーを実行する
 
-Point the runner at the checkpoint directory (local training writes
-`<output-dir>/checkpoints/last/pretrained_model`) or at the hub repo you pushed to:
+ランナーにチェックポイントのディレクトリ(ローカル学習は
+`<output-dir>/checkpoints/last/pretrained_model` に書き込みます)、または
+プッシュ先のhubリポジトリを指定します。
 
 ```bash
 # in sim, against the same scenario
@@ -156,11 +158,11 @@ so101-tool run --backend real --port /dev/ttyACM0 \
     --policy-path your-hf-user/so101-act-pick-cube --policy-task "pick up the red cube"
 ```
 
-Switch the panel Mode to `policy`. Every policy action still passes through the same
-safety filter (joint limits, velocity clamp, floor keep-out, latching e-stop) as manual
-control.
+パネルの Mode を `policy` に切り替えてください。ポリシーが出力するすべての
+アクションは、手動制御と同じ安全フィルタ(関節リミット・速度クランプ・床面
+キープアウト・ラッチ式e-stop)を通過します。
 
-## End-to-end cheat sheet
+## エンドツーエンド チートシート
 
 ```bash
 # 1. scene

@@ -1,63 +1,75 @@
-# Real SO-101 setup & safety
+# 実機SO-101のセットアップと安全性
 
-日本語版: [docs/ja/hardware.md](ja/hardware.md)
+## 前提条件
 
-## Prerequisites
+- Python >= 3.12 と `pip install -e ".[real]"`(`lerobot[feetech]` がインストール
+  されます)。
+- [lerobot SO-101 ガイド](https://huggingface.co/docs/lerobot/so101)に従って
+  アームが組み立てられ、電源が入っていること。
 
-- Python >= 3.12 and `pip install -e ".[real]"` (installs `lerobot[feetech]`).
-- The arm assembled and powered per the
-  [lerobot SO-101 guide](https://huggingface.co/docs/lerobot/so101).
-
-## Serial port
+## シリアルポート
 
 ```bash
 ls /dev/ttyACM*            # usually /dev/ttyACM0
 sudo usermod -aG dialout $USER   # then log out/in — avoids sudo for the port
 ```
 
-If several devices are attached, unplug/replug the arm and diff `ls /dev/ttyACM*`.
+複数のデバイスが接続されている場合は、アームを抜き差しして `ls /dev/ttyACM*`
+の差分を確認してください。
 
-## Calibration
+## キャリブレーション
 
-This tool reads/writes joint angles in degrees through lerobot, so the arm must be
-calibrated with lerobot first (once per robot, stored under `~/.cache/huggingface/lerobot`):
+本ツールはlerobotを介して関節角度を度数で読み書きするため、事前にlerobotで
+アームをキャリブレーションしておく必要があります(ロボットごとに1回、
+`~/.cache/huggingface/lerobot` 以下に保存されます)。
 
 ```bash
 lerobot-calibrate --robot.type=so101_follower --robot.port=/dev/ttyACM0 --robot.id=my_follower
 ```
 
-Use the same `--robot-id` when launching `so101-tool run --backend real`.
+`so101-tool run --backend real` を起動する際は同じ `--robot-id` を使用して
+ください。
 
-## First-connection checklist (do these in order)
+## 初回接続チェックリスト(この順番で実施してください)
 
-1. **Sign check in MIRROR mode.** Launch with the arm powered, switch Mode to `mirror`.
-   The loop only *reads* in this mode. Gently push each joint (if torque prevents it,
-   lerobot's torque can be disabled — or just watch while moving the arm with the leader
-   arm / by hand at low torque). The 3D preview must move the **same direction** as the
-   physical joint. If a joint moves the opposite way, or is offset, fix it in data — edit
-   `JointMap.signs` / `offsets_deg` in `src/so101_tool/config.py` (per-joint, internal =
-   `(real_deg − offset) / sign`) — and re-check. Do not proceed until MIRROR matches.
-2. **Small joint move.** Switch to `rule`, set speed ≈ 0.2, move one joint slider by
-   ~0.2 rad, press *Move to sliders*. Keep a hand near the power switch.
-3. **Cartesian move.** Press *Snap target to TCP*, drag the gizmo a few centimeters,
-   *Go to target (position)*.
-4. **Natural language (optional).** With `ANTHROPIC_API_KEY` set: "open the gripper".
+1. **MIRRORモードでの符号チェック。** アームに通電した状態で起動し、Modeを
+   `mirror` に切り替えます。このモードではループは*読み取りのみ*を行います。
+   各関節をゆっくり押してみてください(トルクで動かせない場合はlerobot側で
+   トルクを無効化できます。あるいは、リーダーアームで動かす/低トルクで手で
+   動かす様子を観察するだけでも構いません)。3Dプレビューは実機の関節と
+   **同じ方向**に動く必要があります。もしある関節が逆方向に動く、あるいは
+   オフセットしている場合は、`src/so101_tool/config.py` の `JointMap.signs` /
+   `offsets_deg` をデータ側で修正してください(関節ごとに、内部値 =
+   `(real_deg − offset) / sign`)。修正後、再度確認します。MIRRORが一致する
+   まで先に進まないでください。
+2. **小さな関節移動。** `rule` に切り替え、速度を約0.2に設定し、関節スライダーを
+   1つ約0.2 rad動かして *Move to sliders* を押します。電源スイッチのそばに
+   手を置いておいてください。
+3. **Cartesian移動。** *Snap target to TCP* を押し、ギズモを数センチドラッグして
+   *Go to target (position)* を押します。
+4. **自然言語(任意)。** `ANTHROPIC_API_KEY` を設定した状態で:
+   「open the gripper」のように指示します。
 
-## Safety behavior
+## 安全動作
 
-- Every command (GUI, natural language, policy) passes the safety filter: joint-limit
-  clamp, per-joint velocity clamp (default 2.0 rad/s × 1.5 margin), floor keep-out.
-- **EMERGENCY STOP** latches and stops writes within one control tick (20 ms). The servos
-  hold their last position (STS3215 position mode); power off for a true hard stop.
-- `disable_torque_on_disconnect=True`: quitting the tool relaxes the arm — support it or
-  home it first so it doesn't drop.
-- The first observation after connect is sanity-checked: values that look like radians
-  instead of degrees abort the connection instead of commanding a violent move.
+- すべてのコマンド(GUI・自然言語・ポリシー)は安全フィルタを通過します:
+  関節リミットのクランプ、関節ごとの速度クランプ(デフォルト2.0 rad/s ×
+  1.5倍のマージン)、床面キープアウト。
+- **EMERGENCY STOP** はラッチ式で、1制御ティック(20 ms)以内に書き込みを
+  停止します。サーボは最後の位置を保持します(STS3215のポジションモード)。
+  真のハード停止が必要な場合は電源を切ってください。
+- `disable_torque_on_disconnect=True`: 本ツールを終了するとアームのトルクが
+  抜けます。アームを支えるか、先にホームポジションに戻しておかないと落下する
+  可能性があります。
+- 接続後最初の観測値はサニティチェックされます。ラジアンのように見える値
+  (度数ではなく)が検出された場合は、乱暴な動作を指令する代わりに接続を
+  中断します。
 
-## Known limitations
+## 既知の制限
 
-- `mirror` mode does not currently toggle torque automatically;
-  `LeRobotBackend.set_torque(False)` exists for scripting it.
-- POLICY mode requires cameras, hence the real backend; configure them via
-  `AppConfig.cameras` (lerobot camera config dicts) when scripting, e.g.
-  `{"front": {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30}}`.
+- `mirror` モードは現状トルクを自動で切り替えません。スクリプトから制御する
+  ための `LeRobotBackend.set_torque(False)` が用意されています。
+- POLICYモードにはカメラが必要なため、実機バックエンド専用です。スクリプトで
+  設定する場合は `AppConfig.cameras`(lerobotのカメラ設定辞書)経由で
+  設定してください。例:
+  `{"front": {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30}}`。

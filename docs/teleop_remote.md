@@ -1,94 +1,37 @@
-# Remote teleoperation (SSH / Codespaces / Brev)
+# リモート接続のセキュリティ設計と補足
 
-日本語版: [docs/ja/teleop_remote.md](ja/teleop_remote.md)
+起動コマンド(SSH先での動かし方・`--link` の連動方向)は
+[README の起動ガイド](../README.md#起動ガイド) にまとまっています。
+このページはリモート接続の**設計**を説明します。
 
-Run so101-tool on a remote container (GitHub Codespaces, NVIDIA Brev, any SSH
-box) and drive it with the **leader arm plugged into your laptop** — for live
-control of the remote sim, dataset recording, or a follower arm attached to
-the remote machine.
+## 脅威モデルとセキュリティ設計
+
+- 受信側は **127.0.0.1 のみにバインド**(コード上、それ以外のバインドを拒否)。
+  ネットワークに一切露出せず、到達経路はSSHトンネルだけ — 暗号化と認証はSSHのものです
+- ハンドシェイクで**セッションごとのランダムトークン**が必須(タイミング安全比較)。
+  共有コンテナ上の他ユーザーもモーションを注入できません。固定トークンが必要な場合は
+  `--teleop-token` または環境変数 `SO101_TELEOP_TOKEN` で上書きできます
+- 固定JSONスキーマ・4KiB行上限・NaN/形状検証・関節リミットクランプ。さらに全ターゲットは
+  制御ループの**安全フィルタ**(速度制限・リミット)を通ります。ストリームが0.5秒途絶えると
+  アームは**その場でホールド**し、非常停止が常に優先されます
+- `--link` の下り方向(シム→実機の `target_q` フレーム)は、認証済みの同じ接続に
+  受信側が書き戻すだけの**全二重化**です。新しいポートも新しい攻撃面も増えません
+- Codespaces の転送ポートはデフォルトで *private*(自分のGitHubアカウントのみ)です。
+  public にする必要はありません
+
+## プロトコル(参考)
+
+改行区切りJSON、1ソケット全二重:
 
 ```
-laptop (leader arm)                      remote container (so101-tool)
-so101-tool teleop-client  ── SSH tunnel ──▶  TeleopReceiver 127.0.0.1:8765
-        │ 50 Hz JSON joint stream                  │ TELEOP mode
-   SO-101 leader                        sim / recording / follower
+client → server  {"token": "<token>"}                  # ハンドシェイク → {"ok": true}
+client → server  {"q": [j1..j5 rad], "gripper": 0..1}  # 実測関節、10〜100 Hz
+server → client  {"target_q": [...], "gripper": g}     # 手元実機へのターゲット(--link 時)
 ```
 
-## Quick start
+## 補足
 
-Remote (Codespace/Brev):
-
-```bash
-so101-tool run --scenario examples/pick_cube.yaml --teleop
-# prints:  teleop receiver: 127.0.0.1:8765  + a session token
-```
-
-Laptop (leader arm attached, `pip install "so101-tool[real]"`):
-
-```bash
-ssh -L 8765:localhost:8765 <remote>      # or use the Codespaces port-forward UI
-so101-tool teleop-client --connect localhost:8765 \
-    --token <printed-token> --port /dev/ttyACM0 --robot-id my_leader
-```
-
-In the browser UI, the **Remote teleop** panel shows 🟢 streaming — press
-**Enable TELEOP mode**. Recording works as usual (Record dataset panel), so
-you can collect real-teleop demonstrations into a remote LeRobotDataset.
-
-No hardware? Test the link end to end with `--source sine` (synthetic
-trajectory) from any machine.
-
-## Security design
-
-- The receiver **only binds 127.0.0.1** (a non-loopback bind is rejected in
-  code). Nothing is ever exposed to the network; the only path in is your SSH
-  tunnel, so transport encryption + authentication are SSH's.
-- A **random per-session token** is required in the handshake
-  (`secrets.compare_digest`); other local users on a shared container cannot
-  inject motion. Override with `--teleop-token`/`SO101_TELEOP_TOKEN` if you
-  need a stable token.
-- Fixed JSON schema, 4 KiB line cap, NaN/shape validation, joint-limit
-  clamping — and every target still passes the control loop's **safety filter**
-  (velocity clamp, limits). If the stream stalls for >0.5 s the arm **holds**
-  instead of drifting; the e-stop always wins.
-- On Codespaces, forwarded ports default to *private* (your GitHub account
-  only) — keep them private; you never need to make them public.
-
-## Real↔MuJoCo link (`--link`)
-
-Beyond one-way teleop, `--link` couples the real arm and the MuJoCo sim in
-**both directions**, switchable at runtime from the 🔗 dropdown in the UI
-header:
-
-| mode | meaning |
-| --- | --- |
-| `to_sim` | 実機→MuJoCo — the real arm is the source of truth; the sim arm follows it (and physically interacts with scene objects). Move the real arm by hand (torque off) and watch the sim mirror it. |
-| `to_real` | MuJoCo→実機 — GUI / NL / policy commands drive the sim, and the same targets are shadowed to the real arm. A real-link hiccup never stops the sim. |
-| `both` | 実機↔MuJoCo — commands go to the real arm and the sim always follows the real measured joints, so hand-moving the arm AND commanding it both stay in sync. |
-
-The "real" side is chosen automatically:
-
-- **Local serial arm** — `so101-tool run --backend real --link both --scenario …`
-- **Over SSH (no serial on the remote box)** — just add `--link` and the
-  receiver starts automatically; on your laptop run the client with
-  `--source follower` so your local arm streams its joints up *and applies
-  the target frames sent back* (full duplex on the same tunneled socket):
-
-```bash
-remote$ so101-tool run --scenario examples/pick_cube.yaml --link both
-laptop$ ssh -L 8765:localhost:8765 <remote>
-laptop$ so101-tool teleop-client --connect localhost:8765 \
-            --token <printed-token> --source follower --port /dev/ttyACM0
-```
-
-The security posture is unchanged: same 127.0.0.1-only socket, same token,
-and the downstream `target_q` frames are just the receiver pushing back on
-the already-authenticated connection — no new port, no new attack surface.
-
-## Notes
-
-- Works with the physics sim (`--scenario`), the bare-arm sim, and
-  `--backend real` (leader on your desk, follower on the remote machine's
-  bus — the usual lerobot wiring but split across the network).
-- Latency: a continental SSH round-trip (~30-80 ms) is fine for teleop at
-  50 Hz; the receiver always uses the latest frame (no queue buildup).
+- 大陸間程度のSSH往復遅延(30〜80 ms)なら50 Hzテレオペに支障ありません。
+  受信側は常に最新フレームだけを使うため、キューの滞留は起きません
+- テレオペ中も録画(データ→Record dataset)は通常どおり動くため、
+  実機テレオペのデモをリモートのデータセットへ直接収集できます

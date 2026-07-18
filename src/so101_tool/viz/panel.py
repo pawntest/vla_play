@@ -277,8 +277,8 @@ class ControlPanel:
         else:
             self._teleop_md = None
             gui.add_markdown(
-                "*リモートテレオペは `--teleop` で起動すると使えます "
-                "([docs/ja/teleop_remote.md](https://github.com/pawntest/vla_play))*"
+                "*リモートテレオペは `--teleop`(または `--link`)で起動すると使えます "
+                "(READMEの起動ガイド参照)*"
             )
 
     def _build_ai_tab(self, gui, app, scenario) -> None:

@@ -1,183 +1,155 @@
 # so101-tool
 
-Control a [LeRobot SO-101](https://huggingface.co/docs/lerobot/so101) robot arm with a
-**live browser 3D preview**, classic **rule-based motion** (tool-frame jogging, move-to-point
-via IK, joint moves) and **AI control** (lerobot policy inference and natural-language
-commands via the Claude API).
+[LeRobot SO-101](https://huggingface.co/docs/lerobot/so101) アームを、ブラウザ3Dプレビュー・
+ルールベース制御(関節/IK移動・ジョグ)・AI制御(lerobotポリシー推論、Claude自然言語)で
+操作するツールです。シミュレーションだけで全機能が動き、実機やSSHリモートはオプションを
+足すだけで有効になります。データ収集(LeRobotDataset)→ 学習 → ポリシー実行まで一貫して
+このツールで完結します。
 
-**Sim-first**: everything — the 3D view, IK, motion primitives, natural-language control —
-runs fully in simulation with zero hardware. Connecting a real SO-101 is an add-on backend:
-the same UI then mirrors the physical arm's joints in 3D (input) and sends every command to
-the servos (output).
-
-日本語のクイックスタートは [docs/README.ja.md](docs/README.ja.md) にあります。
-
-## Quickstart (simulation, no hardware)
+## インストール
 
 ```bash
-pip install -e ".[dev]"          # Python >= 3.10
-so101-tool run --backend sim
-# open http://localhost:8080
+pip install -e ".[dev]"       # シミュレーションのみ(Python >= 3.10)
+pip install -e ".[real]"      # + 実機 SO-101(lerobot、Python >= 3.12)
+pip install -e ".[nl]"        # + 自然言語制御(要 ANTHROPIC_API_KEY)
+pip install -e ".[policy]"    # + ポリシー推論・学習(torch、Python >= 3.12)
 ```
 
-You get a browser 3D scene with the arm and a control panel. **Everything the tool can
-do is available from this UI** — no extra terminals needed:
+## 起動ガイド
 
-- **Scenario** — load a scene YAML, randomize object poses, add/remove objects
-  interactively (incl. **drag gizmos** and **click-in-scene placement**), edit cameras
-  (world-fixed or arm-attached) and the environment (table, floor), save back to YAML
-- **Mode** — `idle` / `mirror` (preview only) / `rule` (motion primitives) / `policy`
-- **Joints / Cartesian** — sliders, *Home*, target gizmo + *Go to target*, tool-frame jogs
-- **Record dataset** — start/save/discard LeRobotDataset episodes while you drive the arm
-- **Scripted demos** — auto-generate pick demonstrations into the same dataset
-- **Policy (AI)** — load a checkpoint (local path or hub id) and run it live
-- **Train** — launch/stop lerobot-train with streamed logs, or export a Colab notebook
-- **Natural language** — chat box (with ANTHROPIC_API_KEY)
-- **EMERGENCY STOP** — latching; no command reaches the robot until reset
+起動は常に `so101-tool run` の1コマンドで、構成はオプションで選びます。起動後
+http://localhost:8080 を開くと、操作・データ収集・学習・シーン編集の全機能がUIから
+使えます(ヘッダーの状態バナーが現在のモードを常時表示。非常停止はラッチ式)。
 
-Check IK health any time (no hardware): `so101-tool ik-check --n 100`
+### 1. シミュレーションのみ(実機なし)
+
+```bash
+so101-tool run                                      # アーム単体
+so101-tool run --scenario examples/pick_cube.yaml   # 物体・カメラ付きの物理シーン
+```
+
+### 2. 実機を直接つなぐ(USBシリアル)
+
+実機がこのPCにUSB接続されている場合は `--backend real` だけです。通信はシリアル直結で、
+トンネルもトークンも登場しません。初回は必ず [docs/hardware.md](docs/hardware.md) の
+安全チェック(ポート権限・キャリブレーション・方向確認)を先に済ませてください。
+
+```bash
+so101-tool run --backend real --port /dev/ttyACM0 --robot-id my_follower
+
+# 実機とシムを連動させる場合は --link を追加(--scenario と併用可)
+so101-tool run --backend real --port /dev/ttyACM0 --link both \
+    --scenario examples/pick_cube.yaml
+```
+
+### 3. SSH先で動かす(Codespaces / Brev など)
+
+アプリはリモート、実機は手元PC、という構成です。リモートにはシリアル接続がないため、
+手元PCで動かす **teleop-client** が実機との橋渡しをします。経路はSSHトンネルのみ・
+トークン認証付きで、ポートを公開する必要はありません
+(設計の詳細: [docs/teleop_remote.md](docs/teleop_remote.md))。
+
+```bash
+# リモート側: --link を付けると受信側が自動起動し、ポートとトークンが表示される
+remote$ so101-tool run --scenario examples/pick_cube.yaml --link both
+
+# 手元PC側: トンネルを張り、実機をクライアントとして接続
+laptop$ ssh -L 8765:localhost:8765 <remote>   # Codespaces はポート転送UIでも可
+laptop$ so101-tool teleop-client --connect localhost:8765 \
+            --token <表示されたトークン> --source follower --port /dev/ttyACM0
+```
+
+- 実機なしで疎通確認: `--source sine`(合成軌道)
+- リーダーアームで片方向テレオペだけしたい場合: リモート側を `--link both` の代わりに
+  `--teleop`、手元側を `--source leader` にする(UIの データ→Remote teleop から有効化)
+
+### 直結とSSHの違い
+
+|  | 2. 直結(USB) | 3. SSHリモート |
+| --- | --- | --- |
+| 実機の場所 | アプリと同じPC | 手元PC(アプリはリモート) |
+| 起動方法 | `--backend real --port …` | アプリ側に `--link`(または `--teleop`)、手元側で `teleop-client` |
+| 通信経路 | シリアル直結 | SSHトンネル(127.0.0.1限定+セッショントークン) |
+| 使える機能 | UI・録画・ポリシー・`--link` 全モード、すべて同じ | 同左 |
+
+### 実機↔シムの連動方向(`--link`)
+
+方向はUIヘッダーの 🔗 ドロップダウンから実行中に切り替えられます:
+
+| モード | 動作 |
+| --- | --- |
+| `to_sim` | 実機→シム。実機が基準でシムが追従(シーン内の物体とも物理干渉)。トルクを切って手で動かすとシムがミラーします |
+| `to_real` | シム→実機。GUI・自然言語・ポリシーの指令はシムを駆動し、同じターゲットを実機へ影として送信。実機側が不調でもシムは止まりません |
+| `both` | 双方向。指令は実機へ、シムは常に実機の実測関節に追従。手で動かしても指令で動かしても同期し続けます |
+
+### よく使う追加オプション
+
+| オプション | 意味 |
+| --- | --- |
+| `--record <repo_id> --record-root <dir>` | UIからLeRobotDatasetエピソードを録画 |
+| `--policy-path <path/hub-id> --policy-task "…"` | 学習済みポリシーをロードして実行 |
+| `--no-nl` | APIキーがあっても自然言語制御を無効化 |
+| `--viser-port <n>` | ブラウザUIのポート(既定 8080) |
+
+## その他のコマンド
+
+```bash
+so101-tool scripted-demos --scenario my.yaml --dataset my --episodes 50   # ピックデモ自動生成
+so101-tool train --dataset data/my --policy act                           # 学習(lerobot-trainラッパー)
+so101-tool ik-check --n 100                                               # IK精度チェック(実機不要)
+so101-tool teleop-client …                                                # 上記3.の手元PC側
+```
+
+## 模倣学習の流れ
+
+シーン定義 → デモ収集 → 学習 → 実行のすべてがUIまたはCLIで完結します。
+詳細な手順とColab(無料GPU)の使い方は [docs/data_and_training.md](docs/data_and_training.md)。
+
+```bash
+cp examples/pick_cube.yaml my_task.yaml                                   # 1. シーン定義
+so101-tool scripted-demos --scenario my_task.yaml --episodes 50 \
+    --dataset my_task --root data/my_task                                 # 2. デモ収集
+so101-tool train --dataset data/my_task --policy act                      # 3. 学習
+so101-tool run --scenario my_task.yaml \
+    --policy-path outputs/train/checkpoints/last/pretrained_model         # 4. 実行
+```
 
 ## Python API
 
-Everything is scriptable — `so101_tool.api` is the library the CLI and GUI are built on:
+CLI・GUIの土台である `so101_tool.api` をそのままライブラリとして使えます:
 
 ```python
 from so101_tool import api
 
 with api.Session(scenario="examples/tabletop_cloth.yaml") as sess:
-    sess.move_to([0.25, 0.0, 0.10])            # IK move (same safety filter as the GUI)
+    sess.move_to([0.25, 0.0, 0.10])   # GUIと同じ安全フィルタを通るIK移動
     sess.gripper(0.0)
-    print(sess.state().tcp_position, sess.object_pose("cube"))
     sess.generate_demos("my/pick", episodes=30, root="data/pick")
 api.train(dataset="data/pick", policy="act")
 ```
 
-`api.Session` also drives the real robot (`backend="real"`) and can serve the browser UI
-on top of itself (`sess.open_ui()`).
+## 安全設計
 
-## Real robot
+- 実機・シムを問わず、全書き込みが安全フィルタ(関節リミット・速度制限・床面チェック)を通ります
+- **非常停止**はラッチ式: 解除ボタンを押すまで一切のコマンドを拒否します
+- 実機の初回接続時は [docs/hardware.md](docs/hardware.md) の方向確認手順に従ってください
 
-Requires Python >= 3.12 (lerobot). See [docs/hardware.md](docs/hardware.md) for port
-permissions, calibration and the first-connection safety checklist.
+## ドキュメント
 
-```bash
-pip install -e ".[real]"
-so101-tool run --backend real --port /dev/ttyACM0 --robot-id my_follower
-```
+- [docs/hardware.md](docs/hardware.md) — 実機SO-101のセットアップ・キャリブレーション・安全手順
+- [docs/teleop_remote.md](docs/teleop_remote.md) — リモート接続のセキュリティ設計と補足
+- [docs/scenario_reference.md](docs/scenario_reference.md) — シーンYAML完全リファレンス(環境・布・複数/取付カメラ)
+- [docs/data_and_training.md](docs/data_and_training.md) — データ収集と学習のワークフロー
+- [docs/architecture.md](docs/architecture.md) — モジュール構成・スレッドモデル・座標系
+- [docs/why_this_tool.md](docs/why_this_tool.md) — Isaac Sim等との比較・YAMLの表現力
 
-The 3D preview is now synchronized with the physical arm: `mirror` mode shows the real
-joint positions live (hand-pose the arm with torque off to verify the model matches);
-`rule` mode drives the servos through the same safety filter as the sim.
+アームの3Dモデルは mujoco_menagerie の
+[`robotstudio_so101`](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101)
+(Apache-2.0)を `src/so101_tool/assets/so101/` に同梱しています。
 
-## Natural-language control (Claude)
-
-```bash
-pip install -e ".[nl]"
-export ANTHROPIC_API_KEY=sk-ant-...
-so101-tool run --backend sim        # or real
-```
-
-A *Natural language* box appears in the panel. Try: *"move the gripper 5 cm forward"*,
-*"go to x=250 y=0 z=150"*, *"open the gripper and go home"*. The model only gets the same
-rule-based primitives you have as buttons — every motion passes through the safety filter,
-and steps larger than 25 cm are refused.
-
-## Trained policy inference (ACT / SmolVLA)
+## 開発
 
 ```bash
-pip install -e ".[policy]"          # Python >= 3.12, pulls torch
-so101-tool run --backend real --port /dev/ttyACM0 \
-    --policy-path lerobot/smolvla_base --policy-task "pick up the cube"
-```
-
-Switch the mode to `policy` in the panel. Policies need camera observations, so this mode
-requires the real backend (documented limitation of the sim backend).
-
-## Remote teleop (Codespaces / Brev / any SSH box)
-
-Run the app on a remote container and drive it with the leader arm on your desk —
-securely (127.0.0.1 + session token, reached only through your SSH tunnel):
-
-```bash
-remote$ so101-tool run --scenario examples/pick_cube.yaml --teleop
-laptop$ ssh -L 8765:localhost:8765 <remote>
-laptop$ so101-tool teleop-client --connect localhost:8765 --token <printed> --port /dev/ttyACM0
-```
-
-See [docs/teleop_remote.md](docs/teleop_remote.md). Test without hardware: `--source sine`.
-
-`--link {to_sim,to_real,both}` couples the real arm and the MuJoCo sim in either
-or both directions (実機→シム / シム→実機 / 双方向), switchable live from the UI
-header — works with a local serial arm (`--backend real`) or over the same SSH
-tunnel (client runs with `--source follower`).
-
-## Imitation learning: record → train → deploy
-
-The tool covers the full imitation-learning loop, sim-first and with a free-GPU cloud
-option — see [docs/data_and_training.md](docs/data_and_training.md) for the whole story.
-The entire loop below can also be driven from the browser UI (Scenario → Record/Scripted
-demos → Train → Policy folders); the CLI equivalents are:
-
-```bash
-# 1. describe the scene + task in YAML (objects, cameras, instruction)
-cp examples/pick_cube.yaml my_task.yaml
-
-# 2. record demonstrations as a LeRobotDataset (by hand in the 3D GUI, or scripted)
-so101-tool run --scenario my_task.yaml --record my_task --record-root data/my_task
-so101-tool scripted-demos --scenario my_task.yaml --episodes 50 \
-    --dataset my_task --root data/my_task
-
-# 3. train (wraps lerobot-train; ACT / SmolVLA / Diffusion)
-so101-tool train --dataset data/my_task --policy act          # local GPU box
-so101-tool train --dataset data/my_task --policy act \
-    --push-dataset --dataset-hub-repo you/so101-my-task \
-    --emit-colab train.ipynb                                  # free GPU: open in Colab
-
-# 4. run the trained policy (sim or real)
-so101-tool run --scenario my_task.yaml \
-    --policy-path outputs/train/checkpoints/last/pretrained_model
-```
-
-Datasets and checkpoints are standard LeRobot formats, so anything trained here runs
-anywhere lerobot runs (and vice versa).
-
-## Architecture (short version)
-
-| Module | Role |
-| --- | --- |
-| `api.py` | public Python API: `Session` (motion, scenes, demos, policies) + `train()` |
-| `kinematics.py` | MuJoCo FK + [mink](https://github.com/kevinzakka/mink) differential IK (TCP = `gripperframe` site) |
-| `scenario.py` | YAML scenes: environment (table/floor/props), rigid + **cloth** objects w/ randomization, world/arm-attached cameras |
-| `robot/sim.py`, `robot/physics_sim.py`, `robot/lerobot_backend.py` | Interchangeable backends behind `RobotInterface`: kinematic sim, contact-physics sim (rendered cameras), real robot |
-| `control/loop.py` | 50 Hz thread owning all robot I/O: command queue in, immutable snapshots out, latching e-stop |
-| `control/safety.py` | Joint-limit clamp, velocity limit, floor check on every write |
-| `viz/` | viser 3D scene driven by MuJoCo body poses + GUI panel |
-| `nl/agent.py` | Claude tool-use agent mapping language → motion primitives |
-| `policy/runner.py` | lerobot policy checkpoint → joint targets (sim or real cameras) |
-| `data/recorder.py`, `demo/scripted.py` | LeRobotDataset recording; deterministic scripted demo generation |
-| `training.py` | `so101-tool train`: local lerobot-train wrapper + Colab notebook export |
-
-Details in [docs/architecture.md](docs/architecture.md). The arm model is
-[`robotstudio_so101` from mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101)
-(Apache-2.0), vendored under `src/so101_tool/assets/so101/`.
-
-## Safety notes
-
-- Every write to the robot (sim or real) goes through the safety filter: joint limits,
-  velocity clamp, floor keep-out.
-- The **EMERGENCY STOP** button latches: motion commands are refused until *Reset e-stop*.
-- On first real-robot use, follow the sign-check procedure in
-  [docs/hardware.md](docs/hardware.md) before commanding any motion.
-
-## See also
-
-- [docs/why_this_tool.md](docs/why_this_tool.md) — honest comparison with Isaac Sim & friends
-- [docs/scenario_reference.md](docs/scenario_reference.md) — full scene YAML reference
-  (environment, objects incl. **cloth**, multi/attached cameras, randomization)
-
-## Development
-
-```bash
-.venv/bin/pytest          # no hardware needed
+.venv/bin/pytest          # 実機不要
 .venv/bin/ruff check src tests
 ```
