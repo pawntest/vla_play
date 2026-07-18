@@ -123,6 +123,51 @@ class Kinematics:
             )
         return q
 
+    def plan_linear(
+        self,
+        q_start: np.ndarray,
+        target_pos: np.ndarray,
+        *,
+        keep_wxyz: np.ndarray | None = None,
+        step: float = 0.005,
+        pos_tol: float = 3e-3,
+    ) -> list[np.ndarray]:
+        """Plan a straight-line TCP path to target_pos as joint waypoints,
+        fully verified BEFORE any motion: every waypoint must place the TCP
+        within pos_tol of the line, else IKError is raised and the caller can
+        refuse the whole move (all-or-nothing, used by tool jogs).
+
+        keep_wxyz (default: the start orientation) anchors the tool
+        orientation as a soft objective — on this 5-DOF arm the wrist holds
+        it where physically possible and position always wins.
+        """
+        start_pose = self.fk(q_start)
+        keep = start_pose.wxyz if keep_wxyz is None else np.asarray(keep_wxyz, dtype=float)
+        delta = np.asarray(target_pos, dtype=float) - start_pose.position
+        dist = float(np.linalg.norm(delta))
+        n = max(1, int(np.ceil(dist / step)))
+        path: list[np.ndarray] = []
+        q = np.asarray(q_start, dtype=float).copy()
+        for i in range(1, n + 1):
+            waypoint = start_pose.position + delta * (i / n)
+            try:
+                # hold the tool orientation where the wrist can...
+                q = self.ik(SE3Pose(position=waypoint, wxyz=keep), q,
+                            pos_tol=pos_tol, iters=40)
+            except IKError:
+                try:
+                    # ...release it where 5 DOF cannot (e.g. yaw during a
+                    # sideways move) — the POSITION guarantee always holds
+                    q = self.ik(SE3Pose(position=waypoint, wxyz=None), q,
+                                pos_tol=pos_tol, iters=60)
+                except IKError as exc:
+                    raise IKError(
+                        f"straight-line path blocked {dist * (i / n) * 1e3:.0f} mm "
+                        f"in ({dist * 1e3:.0f} mm total): {exc}"
+                    ) from exc
+            path.append(q.copy())
+        return path
+
     def ik_velocity(
         self, target: SE3Pose, q_now: np.ndarray, dt: float, *, position_only: bool = False
     ) -> np.ndarray:

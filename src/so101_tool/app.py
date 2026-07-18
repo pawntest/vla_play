@@ -126,6 +126,7 @@ class App:
                 session.robot.model
                 if (session.scenario is not None or hasattr(session.robot, "model"))
                 else Kinematics(),
+                cam_aspect=self.config.render_width / max(1, self.config.render_height),
             )
             self._maybe_nl_agent()
             self.recorder = None

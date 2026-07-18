@@ -87,15 +87,23 @@ def _run(args: RunArgs) -> None:
     if args.nl_model:
         config.nl_model = args.nl_model
 
+    if args.backend == "real" and args.scenario and not args.link:
+        print("note: --scenario runs the physics sim and IGNORES the real arm; "
+              "add --link both to couple them (実機と連動するには --link が必要です)")
+
     server = viser.ViserServer(port=config.viser_port)
-    app = App(
-        server,
-        config,
-        scenario_path=args.scenario,
-        record_repo=args.record,
-        record_root=args.record_root,
-        record_fps=args.record_fps,
-    )
+    try:
+        app = App(
+            server,
+            config,
+            scenario_path=args.scenario,
+            record_repo=args.record,
+            record_root=args.record_root,
+            record_fps=args.record_fps,
+        )
+    except Exception as exc:
+        server.stop()
+        raise SystemExit(f"startup failed — {type(exc).__name__}: {exc}") from exc
     print()
     print(f"  ▶ 3D preview: http://localhost:{config.viser_port}")
     if app.teleop_rx is not None:
@@ -104,6 +112,9 @@ def _run(args: RunArgs) -> None:
         print(f"    on your laptop:  ssh -L {rx.port}:localhost:{rx.port} <this-host>")
         print(f"                     so101-tool teleop-client --connect localhost:{rx.port} \\")
         print(f"                         --token {rx.token} --port /dev/ttyACM0")
+    if config.link:
+        print(f"  ▶ real<->sim link: {config.link} — real side connects in the "
+              "background; status is shown in the UI header banner")
     print("    Ctrl-C to exit.")
     print()
     run_app(app, config.render_hz)

@@ -18,7 +18,7 @@ import numpy as np
 from loop_rate_limiters import RateLimiter
 
 from ..config import AppConfig
-from ..kinematics import Kinematics, SE3Pose
+from ..kinematics import IKError, Kinematics, SE3Pose
 from ..robot.base import RobotInterface, RobotState
 from .commands import Command, Home, JogTool, Mode, MoveJ, MoveL, SetGripper, SetMode, Stop
 from .safety import SafetyFilter
@@ -108,6 +108,37 @@ class _MoveLExec(_Executor):
         return self.q_cmd, self.g_cmd, done
 
 
+class _PathExec(_Executor):
+    """Plays a pre-planned, pre-verified joint path (tool jogs).
+
+    The whole Cartesian path was validated with plan_linear() BEFORE motion
+    starts, so the TCP tracks the straight line the user asked for — and an
+    unreachable jog never moves the robot at all."""
+
+    def __init__(self, path: list[np.ndarray], cmd: Command, state: RobotState,
+                 vmax: np.ndarray, speed: float):
+        self.path = path
+        self.idx = 0
+        self.vmax = vmax
+        self.speed = float(np.clip(speed, 0.05, 1.0))
+        self.q_cmd = state.q.copy()
+        self.g_cmd = state.gripper
+        nominal = sum(
+            float(np.max(np.abs(b - a))) for a, b in zip([state.q, *path[:-1]], path)
+        ) / float(np.min(vmax) * self.speed)
+        super().__init__(cmd, time.monotonic() + 3.0 * nominal + 1.0)
+
+    def step(self, state: RobotState, dt: float):
+        target = self.path[self.idx]
+        step = self.vmax * self.speed * dt
+        self.q_cmd += np.clip(target - self.q_cmd, -step, step)
+        if self.idx < len(self.path) - 1 and np.max(np.abs(self.q_cmd - target)) < 1e-4:
+            self.idx += 1
+        done = (self.idx == len(self.path) - 1
+                and np.max(np.abs(state.q - self.path[-1])) < _JOINT_TOL)
+        return self.q_cmd, self.g_cmd, done
+
+
 class _SetGripperExec(_Executor):
     def __init__(self, cmd: SetGripper, state: RobotState, q_cmd: np.ndarray):
         self.target = float(np.clip(cmd.fraction, 0.0, 1.0))
@@ -122,7 +153,11 @@ class _SetGripperExec(_Executor):
         return self.q_cmd, self.g_cmd, abs(state.gripper - self.target) < _GRIPPER_TOL
 
 
-def _jog_target(kin: Kinematics, state: RobotState, cmd: JogTool) -> SE3Pose:
+def _plan_jog(kin: Kinematics, state: RobotState, cmd: JogTool,
+              floor_z: float) -> list[np.ndarray]:
+    """Jog contract: the TCP translates EXACTLY by dpos along a straight line
+    with the tool orientation held (as far as 5 DOF allow), or — when that is
+    physically unreachable — the robot does not move at all (raises)."""
     pose = kin.fk(state.q)
     dpos = np.asarray(cmd.dpos, dtype=float)
     if cmd.frame == "tool":
@@ -131,7 +166,16 @@ def _jog_target(kin: Kinematics, state: RobotState, cmd: JogTool) -> SE3Pose:
 
         mujoco.mju_quat2Mat(mat, pose.wxyz)
         dpos = mat.reshape(3, 3) @ dpos
-    return SE3Pose(position=pose.position + dpos, wxyz=None)
+    target = pose.position + dpos
+    if target[2] < floor_z + 0.005:
+        raise ValueError(
+            f"jog refused: target z={target[2] * 1e3:.0f} mm is below the floor "
+            "keep-out — the robot did not move"
+        )
+    try:
+        return kin.plan_linear(state.q, target, keep_wxyz=pose.wxyz)
+    except IKError as exc:
+        raise IKError(f"jog refused, robot did not move — {exc}") from exc
 
 
 class ControlLoop(threading.Thread):
@@ -207,8 +251,8 @@ class ControlLoop(threading.Thread):
                                  None if cmd.wxyz is None else np.asarray(cmd.wxyz, float))
                 self._active = _MoveLExec(target, cmd, state, self._kin, cmd.speed)
             elif isinstance(cmd, JogTool):
-                self._active = _MoveLExec(_jog_target(self._kin, state, cmd), cmd, state,
-                                          self._kin, cmd.speed)
+                path = _plan_jog(self._kin, state, cmd, self._safety.floor_z)
+                self._active = _PathExec(path, cmd, state, vmax, cmd.speed)
             elif isinstance(cmd, SetGripper):
                 self._active = _SetGripperExec(cmd, state, q_cmd)
         except Exception as exc:  # bad target etc. — never kill the loop

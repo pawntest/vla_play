@@ -28,7 +28,9 @@ def _pair(link: str) -> tuple[LinkedBackend, SimBackend, SimBackend, Clock]:
     sim = SimBackend(jm, clock=clock)
     real = SimBackend(jm, clock=clock)  # stands in for the real arm
     linked = LinkedBackend(sim, real, link=link)
-    linked.connect()
+    linked.connect()  # real side connects in a background thread
+    assert linked.wait_real(5.0), linked.real_status
+    linked.read_state()  # first read marks the real side live
     return linked, sim, real, clock
 
 
@@ -88,7 +90,7 @@ def test_to_real_reads_sim_and_shadows_real():
     assert np.allclose(real.read_state().q, Q, atol=1e-6)  # real shadowed it
 
 
-def test_to_real_tolerates_real_failure_but_both_does_not():
+def test_real_write_failure_degrades_but_never_raises():
     class Broken(SimBackend):
         def write_targets(self, q, gripper):
             raise OSError("serial port gone")
@@ -98,12 +100,65 @@ def test_to_real_tolerates_real_failure_but_both_does_not():
     linked = LinkedBackend(SimBackend(jm, clock=clock), Broken(jm, clock=clock),
                            link="to_real")
     linked.connect()
+    assert linked.wait_real(5.0)
     linked.write_targets(Q, 0.5)  # must not raise: sim keeps working
     clock.t += 0.05
     assert np.allclose(linked.read_state().q, Q, atol=1e-6)
-    linked.set_link("both")
-    with pytest.raises(OSError):  # in both, the real arm IS the robot
-        linked.write_targets(Q, 0.5)
+    assert not linked.real_ok and linked.real_status.startswith("error")
+
+    # both: same failure degrades to sim-only instead of crashing the loop
+    linked2 = LinkedBackend(SimBackend(jm, clock=clock), Broken(jm, clock=clock),
+                            link="both")
+    linked2.connect()
+    assert linked2.wait_real(5.0)
+    linked2.read_state()  # marks the real side live
+    linked2.write_targets(Q, 0.5)  # real write fails -> sim still gets the target
+    clock.t += 0.05
+    assert np.allclose(linked2.read_state().q, Q, atol=1e-6)
+    assert linked2.real_status.startswith("error")
+
+
+def test_real_connect_failure_keeps_sim_alive():
+    """The reported bug: a real arm that fails to connect must not take the
+    app down — the sim keeps working and the status says what went wrong."""
+
+    class NoPort(SimBackend):
+        def connect(self):
+            raise RuntimeError("could not open /dev/ttyACM0")
+
+    clock = Clock()
+    jm = JointMap(vmax_rad_s=np.full(5, 1000.0))
+    linked = LinkedBackend(SimBackend(jm, clock=clock), NoPort(jm, clock=clock),
+                           link="both")
+    linked.connect()  # must not raise
+    assert not linked.wait_real(5.0)
+    assert "ttyACM0" in linked.real_status
+    linked.write_targets(Q, 0.5)  # degraded: behaves like the plain sim
+    clock.t += 0.05
+    state = linked.read_state()
+    assert np.allclose(state.q, Q, atol=1e-6)
+
+
+def test_placeholder_real_state_does_not_drag_sim_home():
+    """A remote arm reports connected=False until its stream starts; the sim
+    must stay the source (not get pulled to the placeholder home pose)."""
+
+    class NotStreaming(SimBackend):
+        def read_state(self):
+            state = super().read_state()
+            state.connected = False
+            return state
+
+    clock = Clock()
+    jm = JointMap(vmax_rad_s=np.full(5, 1000.0))
+    sim = SimBackend(jm, clock=clock)
+    linked = LinkedBackend(sim, NotStreaming(jm, clock=clock), link="both")
+    linked.connect()
+    assert linked.wait_real(5.0)
+    linked.write_targets(Q, 0.5)  # no live stream -> the sim takes the command
+    clock.t += 0.05
+    assert np.allclose(linked.read_state().q, Q, atol=1e-6)
+    assert not linked.real_live
 
 
 def test_session_builds_linked_backend_with_remote_real_side():

@@ -6,14 +6,27 @@
 足すだけで有効になります。データ収集(LeRobotDataset)→ 学習 → ポリシー実行まで一貫して
 このツールで完結します。
 
-## インストール
+## セットアップ(5分)
+
+必要なものは **Python 3.12 以上**だけです(GPU 不要・実機なしで全機能が試せます)。
 
 ```bash
-pip install -e ".[dev]"       # シミュレーションのみ(Python >= 3.10)
-pip install -e ".[real]"      # + 実機 SO-101(lerobot、Python >= 3.12)
-pip install -e ".[nl]"        # + 自然言語制御(要 ANTHROPIC_API_KEY)
-pip install -e ".[policy]"    # + ポリシー推論・学習(torch、Python >= 3.12)
+git clone <このリポジトリのURL> && cd vla_play
+
+uv sync                          # uv の場合(推奨)。pip の場合: pip install -e ".[dev]"
+
+so101-tool run --scenario examples/pick_cube.yaml    # 起動確認
+# → ブラウザで http://localhost:8080 を開き、アームと赤いキューブが
+#   表示されれば成功。あとは画面右のパネルだけで操作できます。
 ```
+
+追加機能は使うときに入れます(uv は `uv sync --extra real` のように指定):
+
+| extras | 追加されるもの |
+| --- | --- |
+| `.[real]` | 実機 SO-101 接続(lerobot) |
+| `.[nl]` | 自然言語制御(環境変数 `ANTHROPIC_API_KEY` が必要) |
+| `.[policy]` | ポリシー推論・学習(torch を含む) |
 
 ## 起動ガイド
 
@@ -146,6 +159,16 @@ api.train(dataset="data/pick", policy="act")
 アームの3Dモデルは mujoco_menagerie の
 [`robotstudio_so101`](https://github.com/google-deepmind/mujoco_menagerie/tree/main/robotstudio_so101)
 (Apache-2.0)を `src/so101_tool/assets/so101/` に同梱しています。
+
+## トラブルシューティング
+
+| 症状 | 対処 |
+| --- | --- |
+| ブラウザに何も表示されない | 起動ログのエラーを確認。ポート競合なら `--viser-port 8081` などに変更 |
+| ヘッダーに「⚠ 実機側: error…」が出る | シリアルポート権限・キャリブレーション([docs/hardware.md](docs/hardware.md))、`lerobot[feetech]` のインストールを確認。**アプリはシム単体のまま動き続けます** — 実機側を直してもう一度起動してください |
+| 実機↔シムが連動しない | `--link` を付けているか確認(`--backend real --scenario` だけでは連動しません)。SSH構成では手元PCの `teleop-client --source follower` の接続を確認 |
+| ジョグを押しても「refused」と出て動かない | 目標位置が到達不能または床面下です。仕様: 正確に並進できない場合ロボットは一切動きません |
+| 画面の動きが重い | 「📷 カメラ」タブのリアルタイムプレビューをオフに |
 
 ## 開発
 

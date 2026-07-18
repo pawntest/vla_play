@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vla-play"
-version = "0.1.0"
+version = "0.2.0b1"
 description = "LeRobot SO-101 control tool with VLA-play: live 3D preview (viser), rule-based tool-frame/IK motion, AI control (lerobot policies + natural-language via Claude)"
 readme = "README.md"
 requires-python = ">=3.12"

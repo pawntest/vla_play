@@ -93,6 +93,73 @@ def test_jog_tool_moves_tcp(stack, check_kin):
     assert np.linalg.norm(p1 - (p0 + [0, 0, 0.03])) < 6e-3
 
 
+def test_jog_is_pure_translation(stack, check_kin):
+    """Jog contract: the TCP lands exactly at start+dpos and the tool
+    orientation is held (a forward jog is fully wrist-compensable)."""
+    robot, loop = stack
+    setup = MoveJ(q=np.array([0.0, -0.5, 0.8, 0.3, 0.0]), speed=1.0)
+    loop.commands.put(setup)
+    assert setup.wait(10.0) and setup.ok
+    pose0 = check_kin.fk(robot.q)
+    p0, w0 = pose0.position.copy(), pose0.wxyz.copy()
+    jog = JogTool(dpos=np.array([0.04, 0.0, 0.0]), frame="base", speed=1.0)
+    loop.commands.put(jog)
+    assert jog.wait(15.0) and jog.ok, jog.error
+    pose1 = check_kin.fk(robot.q)
+    assert np.linalg.norm(pose1.position - (p0 + [0.04, 0, 0])) < 5e-3
+    angle = 2 * np.arccos(min(1.0, abs(float(np.dot(w0, pose1.wxyz)))))
+    assert angle < 0.15, f"tool rotated {np.degrees(angle):.1f} deg during the jog"
+
+
+def test_unreachable_jog_does_not_move_at_all(stack):
+    robot, loop = stack
+    time.sleep(0.1)
+    q0 = robot.q.copy()
+    jog = JogTool(dpos=np.array([0.0, 0.0, 0.6]), frame="base", speed=1.0)
+    loop.commands.put(jog)
+    assert jog.wait(15.0)
+    assert not jog.ok and "refused" in (jog.error or ""), jog.error
+    time.sleep(0.1)
+    assert np.max(np.abs(robot.q - q0)) < 1e-9, "robot moved on a refused jog"
+
+
+def test_jog_below_floor_refused(stack):
+    robot, loop = stack
+    time.sleep(0.1)
+    q0 = robot.q.copy()
+    jog = JogTool(dpos=np.array([0.0, 0.0, -1.0]), frame="base", speed=1.0)
+    loop.commands.put(jog)
+    assert jog.wait(5.0)
+    assert not jog.ok and "refused" in (jog.error or "")
+    time.sleep(0.1)
+    assert np.max(np.abs(robot.q - q0)) < 1e-9
+
+
+def test_plan_linear_waypoints_track_the_line(check_kin):
+    from so101_tool.kinematics import Kinematics
+
+    kin = Kinematics()
+    q0 = np.array([0.0, -0.5, 0.8, 0.3, 0.0])
+    p0 = kin.fk(q0).position.copy()
+    target = p0 + np.array([0.05, 0.02, -0.03])
+    path = kin.plan_linear(q0, target)
+    direction = (target - p0) / np.linalg.norm(target - p0)
+    for q in path:
+        p = kin.fk(q).position
+        along = float(np.dot(p - p0, direction))
+        lateral = float(np.linalg.norm((p - p0) - along * direction))
+        assert lateral < 4e-3, f"waypoint strayed {lateral * 1e3:.1f} mm off the line"
+    assert np.linalg.norm(kin.fk(path[-1]).position - target) < 3e-3
+
+
+def test_plan_linear_unreachable_raises():
+    from so101_tool.kinematics import IKError, Kinematics
+
+    kin = Kinematics()
+    with pytest.raises(IKError):
+        kin.plan_linear(np.zeros(5), np.array([0.0, 0.0, 0.9]))
+
+
 def test_preemption(stack):
     robot, loop = stack
     slow = MoveJ(q=np.array([1.5, 0, 0, 0, 0]), speed=0.1)

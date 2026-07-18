@@ -148,9 +148,26 @@ class ControlPanel:
         with tab:
             self._build_scene_tab(gui, app, scenario)
 
+        self._cam_images = {}
+        self._cam_preview_cb = None
+        self._cam_tick = 0
+        if hasattr(app.backend, "get_camera_frames"):
+            tab = self._tab_group.add_tab("📷 カメラ")
+            self._tabs.append(tab)
+            with tab:
+                self._build_camera_tab(gui, app)
+
     # ------------------------------------------------------------------ tabs --
 
     def _build_control_tab(self, gui, server) -> None:
+        with gui.add_folder("❓ はじめての方へ", expand_by_default=False):
+            gui.add_markdown(
+                "1. **動かす** — このタブのスライダー・ギズモ、または3Dモデルを直接ドラッグ\n"
+                "2. **撮る** — 「🎬 データ」タブで操作を録画(模倣学習データになります)\n"
+                "3. **学習** — 「🧠 学習」タブで学習し、ポリシーとして実行\n\n"
+                "モードの切り替えは不要です(操作すると自動で切り替わり、"
+                "上のバナーが現在の状態を表示します)。困ったら赤い**非常停止**。"
+            )
         gui.add_markdown("*どの操作も自動で「手動操作」モードに切り替わります*")
         self._speed = gui.add_slider("速度", min=0.1, max=1.0, step=0.05, initial_value=0.5)
 
@@ -426,6 +443,34 @@ class ControlPanel:
         save_btn = gui.add_button("💾 シーンをYAMLに保存")
         save_btn.on_click(lambda _: self._save_scenario())
 
+    def _build_camera_tab(self, gui, app) -> None:
+        """Live per-camera previews + 3D frustum toggle (📷 tab)."""
+        try:
+            frames = app.backend.get_camera_frames()
+        except Exception:
+            frames = {}
+        if not frames:
+            gui.add_markdown(
+                "*このシーンにカメラがありません。「🌍 シーン」タブの"
+                "カメラ編集から追加できます*"
+            )
+            return
+        self._cam_preview_cb = gui.add_checkbox(
+            "🎥 リアルタイムプレビュー", initial_value=True,
+            hint="全カメラを約2Hzで描画します(動作が重いときはオフに)",
+        )
+        self._cam_frustum_cb = gui.add_checkbox(
+            "📐 3D空間に画角を表示", initial_value=True,
+            hint="各カメラの位置と視野をフラスタムで描画します",
+        )
+        self._cam_frustum_cb.on_update(
+            lambda _: self._app.view.set_cameras_visible(self._cam_frustum_cb.value)
+        )
+        for name, img in sorted(frames.items()):
+            self._cam_images[name] = gui.add_image(
+                img, label=f"{name} ({img.shape[1]}×{img.shape[0]})"
+            )
+
     # ------------------------------------------------------------- lifecycle --
 
     def cleanup_gui(self) -> None:
@@ -646,6 +691,13 @@ class ControlPanel:
                 f"{'実機' if snap.backend_is_real else 'シム'}")
         if self._link_dd is not None:
             info += f" ・ 🔗 {_LINK_SHORT[app.backend.link]}"
+            rs = app.backend.real_status
+            if rs != "connected":
+                jp = {"connecting": "接続中…(初回はlerobot読込で数十秒かかります)",
+                      "disconnected": "未接続"}.get(rs, rs)
+                info += f"\n⚠ 実機側: {jp} — シム単体で動作継続中"
+            elif app.backend.link != "to_real" and not app.backend.real_live:
+                info += "\n⚠ 実機側: ストリーム待ち(teleop-client の接続を確認)"
         badge = "🔴 REC" if (app.recorder is not None and app.recorder.recording) else ""
 
         if snap.estop:
@@ -702,3 +754,19 @@ class ControlPanel:
             for s, v in zip(self._joint_sliders, snap.q):
                 s.value = float(np.clip(v, s.min, s.max))
             self._gripper_slider.value = float(snap.gripper)
+
+        # camera previews (~2 Hz: update() runs at ~5 Hz, every 3rd pass)
+        if (self._cam_images and self._cam_preview_cb is not None
+                and self._cam_preview_cb.value):
+            self._cam_tick += 1
+            if self._cam_tick % 3 == 0:
+                try:
+                    frames = app.backend.get_camera_frames()
+                except Exception:
+                    frames = {}
+                for name, img in frames.items():
+                    handle = self._cam_images.get(name)
+                    if handle is not None:
+                        handle.image = img
+                if app.view is not None and self._cam_frustum_cb.value:
+                    app.view.set_camera_images(frames)

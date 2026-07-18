@@ -10,6 +10,8 @@ quaternion convention.
 
 from __future__ import annotations
 
+import math
+
 import mujoco
 import numpy as np
 import trimesh
@@ -20,6 +22,10 @@ from ..kinematics import Kinematics
 
 # group 2 = the arm MJCF `visual` class; group 0 = plain geoms (scenario objects)
 _VISIBLE_GROUPS = (0, 2)
+
+# MuJoCo cameras look along -Z with +Y up (OpenGL); viser frustums use the
+# OpenCV convention (+Z forward, +Y down). Flip Y and Z to convert.
+_MJ_TO_CV = np.diag([1.0, -1.0, -1.0])
 
 
 def _geom_trimesh(model: mujoco.MjModel, gid: int) -> trimesh.Trimesh | None:
@@ -54,6 +60,7 @@ class RobotView:
         server: viser.ViserServer,
         source: Kinematics | mujoco.MjModel,
         root: str = "/robot",
+        cam_aspect: float = 4.0 / 3.0,
     ):
         model = source.model if isinstance(source, Kinematics) else source
         self.model = model
@@ -107,6 +114,22 @@ class RobotView:
         self._tcp_frame = server.scene.add_frame("/tcp", axes_length=0.05, axes_radius=0.0025)
         self._handles.append(self._tcp_frame)
 
+        # Scenario cameras: a small frustum per camera so the field of view is
+        # visible in 3D (world-fixed AND arm-attached — poses follow sync).
+        self._cams: list[tuple[int, str, viser.CameraFrustumHandle]] = []
+        for cid in range(model.ncam):
+            cam_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_CAMERA, cid) or f"cam{cid}"
+            frustum = server.scene.add_camera_frustum(
+                f"/cameras/{cam_name}",
+                fov=math.radians(float(model.cam_fovy[cid])),
+                aspect=cam_aspect,
+                scale=0.05,
+                color=(255, 170, 30),
+                line_width=1.6,
+            )
+            self._cams.append((cid, cam_name, frustum))
+            self._handles.append(frustum)
+
         # Deformables (cloth): flex meshes get their vertices re-sent per sync.
         self._server = server
         self._flexes: list[tuple[int, str, np.ndarray, tuple]] = []
@@ -141,6 +164,14 @@ class RobotView:
         for bid, frame in self._frames:
             frame.position = data.xpos[bid]
             frame.wxyz = data.xquat[bid]
+        if self._cams:
+            mujoco.mj_camlight(self.model, data)  # fills cam_xpos/cam_xmat
+            wxyz = np.empty(4)
+            for cid, _name, frustum in self._cams:
+                rot = data.cam_xmat[cid].reshape(3, 3) @ _MJ_TO_CV
+                mujoco.mju_mat2Quat(wxyz, np.ascontiguousarray(rot.reshape(-1)))
+                frustum.position = data.cam_xpos[cid]
+                frustum.wxyz = wxyz
         if self._flexes:
             self._sync_flexes()
         wxyz = np.empty(4)
@@ -171,6 +202,17 @@ class RobotView:
             except Exception:
                 pass
         self._flex_handles.clear()
+
+    def set_camera_images(self, frames: dict[str, np.ndarray]) -> None:
+        """Show the latest render inside each camera's frustum."""
+        for _cid, name, frustum in self._cams:
+            img = frames.get(name)
+            if img is not None:
+                frustum.image = img
+
+    def set_cameras_visible(self, visible: bool) -> None:
+        for _cid, _name, frustum in self._cams:
+            frustum.visible = visible
 
     def sync(self, q: np.ndarray, gripper: float) -> None:
         """Arm-only convenience: joint values -> qpos (model must be the bare arm)."""
