@@ -54,6 +54,37 @@ trajectory) from any machine.
 - On Codespaces, forwarded ports default to *private* (your GitHub account
   only) — keep them private; you never need to make them public.
 
+## Real↔MuJoCo link (`--link`)
+
+Beyond one-way teleop, `--link` couples the real arm and the MuJoCo sim in
+**both directions**, switchable at runtime from the 🔗 dropdown in the UI
+header:
+
+| mode | meaning |
+| --- | --- |
+| `to_sim` | 実機→MuJoCo — the real arm is the source of truth; the sim arm follows it (and physically interacts with scene objects). Move the real arm by hand (torque off) and watch the sim mirror it. |
+| `to_real` | MuJoCo→実機 — GUI / NL / policy commands drive the sim, and the same targets are shadowed to the real arm. A real-link hiccup never stops the sim. |
+| `both` | 実機↔MuJoCo — commands go to the real arm and the sim always follows the real measured joints, so hand-moving the arm AND commanding it both stay in sync. |
+
+The "real" side is chosen automatically:
+
+- **Local serial arm** — `so101-tool run --backend real --link both --scenario …`
+- **Over SSH (no serial on the remote box)** — just add `--link` and the
+  receiver starts automatically; on your laptop run the client with
+  `--source follower` so your local arm streams its joints up *and applies
+  the target frames sent back* (full duplex on the same tunneled socket):
+
+```bash
+remote$ so101-tool run --scenario examples/pick_cube.yaml --link both
+laptop$ ssh -L 8765:localhost:8765 <remote>
+laptop$ so101-tool teleop-client --connect localhost:8765 \
+            --token <printed-token> --source follower --port /dev/ttyACM0
+```
+
+The security posture is unchanged: same 127.0.0.1-only socket, same token,
+and the downstream `target_q` frames are just the receiver pushing back on
+the already-authenticated connection — no new port, no new attack surface.
+
 ## Notes
 
 - Works with the physics sim (`--scenario`), the bare-arm sim, and

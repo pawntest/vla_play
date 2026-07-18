@@ -123,10 +123,14 @@ class App:
             self.server.gui.reset()
             self.view = RobotView(
                 self.server,
-                session.robot.model if session.scenario is not None else Kinematics(),
+                session.robot.model
+                if (session.scenario is not None or hasattr(session.robot, "model"))
+                else Kinematics(),
             )
             self._maybe_nl_agent()
             self.recorder = None
+            if session.teleop_rx is not None:
+                self.teleop_rx = session.teleop_rx
             if self.teleop_rx is not None:
                 session.loop.set_teleop_source(self.teleop_rx)
             self.panel = ControlPanel(self.server, self)

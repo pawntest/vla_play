@@ -111,6 +111,9 @@ class AppConfig:
     render_width: int = 320
     render_height: int = 240
     no_nl: bool = False  # disable the Claude NL agent even if an API key is set
+    # Real<->sim link (robot/linked.py): None | "to_sim" | "to_real" | "both".
+    # Real side = serial (backend="real") or the remote teleop client otherwise.
+    link: str | None = None
     # Remote teleop receiver (see teleop/receiver.py — 127.0.0.1 + token only)
     teleop: bool = False
     teleop_port: int = 8765

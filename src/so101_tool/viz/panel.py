@@ -52,6 +52,14 @@ _MODE_BANNER = {
 _CMD_JP = {"MoveJ": "関節移動", "MoveL": "直線移動(IK)", "JogTool": "ジョグ",
            "SetGripper": "グリッパー", "Home": "ホーム復帰"}
 
+# real<->sim link modes (robot/linked.py LinkedBackend), dropdown label per mode
+_LINK_LABELS = {
+    "to_sim": "実機→シム(実機を手で/外部から動かす)",
+    "to_real": "シム→実機(シムから操作、実機が追従)",
+    "both": "双方向(実機↔シム)",
+}
+_LINK_SHORT = {"to_sim": "実機→シム", "to_real": "シム→実機", "both": "実機↔シム"}
+
 
 def _find_scenarios() -> list[str]:
     found = []
@@ -101,7 +109,16 @@ class ControlPanel:
         self._reset_estop_btn.on_click(lambda _: self._loop.reset_estop())
         stop_btn.on_click(lambda _: (self._put(Stop()),
                                      self._put(SetMode(mode=Mode.IDLE))))
-        if app.backend is not None and app.backend.is_real:
+        from ..robot.linked import LinkedBackend
+
+        self._link_dd = None
+        if isinstance(app.backend, LinkedBackend):
+            self._link_dd = gui.add_dropdown(
+                "🔗 リンク方向", options=tuple(_LINK_LABELS.values()),
+                initial_value=_LINK_LABELS[app.backend.link],
+            )
+            self._link_dd.on_update(lambda _: self._set_link())
+        elif app.backend is not None and app.backend.is_real:
             mirror_btn = gui.add_button("🪞 ミラーモード(実機を手で動かす)")
             mirror_btn.on_click(lambda _: self._put(SetMode(mode=Mode.MIRROR)))
 
@@ -449,6 +466,16 @@ class ControlPanel:
             self._put(SetMode(mode=Mode.RULE))
         self._put(cmd)
 
+    def _set_link(self) -> None:
+        """Switch the real<->sim link direction (LinkedBackend only)."""
+        mode = {v: k for k, v in _LINK_LABELS.items()}[self._link_dd.value]
+        self._app.backend.set_link(mode)
+        # to_sim: the real arm is the source and loop writes are dropped, so
+        # park the loop in MIRROR (read-only) — RULE primitives would time out.
+        # to_real/both accept commands: back to IDLE, ready for _put_motion.
+        self._put(Stop())
+        self._put(SetMode(mode=Mode.MIRROR if mode == "to_sim" else Mode.IDLE))
+
     def _set_direct_drag(self) -> None:
         if self._app.direct_drag is not None:
             self._app.direct_drag.enabled = self._direct_drag_cb.value
@@ -617,6 +644,8 @@ class ControlPanel:
         tcp = np.round(snap.tcp_position * 1000).astype(int)
         info = (f"TCP: {tcp[0]}, {tcp[1]}, {tcp[2]} mm ・ グリッパー {snap.gripper:.2f} ・ "
                 f"{'実機' if snap.backend_is_real else 'シム'}")
+        if self._link_dd is not None:
+            info += f" ・ 🔗 {_LINK_SHORT[app.backend.link]}"
         badge = "🔴 REC" if (app.recorder is not None and app.recorder.recording) else ""
 
         if snap.estop:

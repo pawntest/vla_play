@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import math
 import socket
+import threading
 import time
 
 import numpy as np
@@ -39,6 +40,37 @@ class _SineSource:
         t = time.monotonic() - self._t0
         q = [0.4 * math.sin(0.5 * t + i) for i in range(5)]
         return q, 0.5 * (1 + math.sin(0.8 * t))
+
+
+class _FollowerDevice:
+    """Local SO-101 follower: streams its measured joints up AND applies
+    target frames received from the server (Mujoco→実機 / 双方向 link)."""
+
+    def __init__(self, port: str, robot_id: str):
+        try:
+            from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
+        except ImportError as exc:
+            raise RuntimeError(
+                'follower teleop requires lerobot: pip install "so101-tool[real]" '
+                "(Python >= 3.12)"
+            ) from exc
+        self._robot = SO101Follower(SO101FollowerConfig(
+            port=port, id=robot_id, use_degrees=True,
+            disable_torque_on_disconnect=True))
+        self._robot.connect()
+
+    def read(self) -> tuple[list[float], float]:
+        obs = self._robot.get_observation()
+        q = [math.radians(float(obs[f"{j}.pos"])) for j in ARM_JOINTS]
+        return q, float(np.clip(obs["gripper.pos"] / 100.0, 0.0, 1.0))
+
+    def apply(self, q: list[float], gripper: float) -> None:
+        action = {f"{j}.pos": math.degrees(q[i]) for i, j in enumerate(ARM_JOINTS)}
+        action["gripper.pos"] = float(np.clip(gripper, 0.0, 1.0) * 100.0)
+        self._robot.send_action(action)
+
+    def close(self) -> None:
+        self._robot.disconnect()
 
 
 class _LeaderSource:
@@ -70,17 +102,48 @@ def run_teleop_client(connect: str, token: str, source: str = "leader",
                       hz: float = 50.0) -> None:
     """Stream leader joints to `connect` ("host:port") until Ctrl-C."""
     host, _, port = connect.partition(":")
-    reader = _SineSource() if source == "sine" else _LeaderSource(serial_port, robot_id)
+    if source == "sine":
+        reader = _SineSource()
+    elif source == "follower":
+        reader = _FollowerDevice(serial_port, robot_id)
+    else:
+        reader = _LeaderSource(serial_port, robot_id)
+    applied = [0]
+
+    def _apply_targets(f):
+        """Reader thread: server -> client target frames (full duplex)."""
+        while True:
+            try:
+                line = f.readline(4096)
+            except TimeoutError:
+                continue  # no targets lately (実機→シム link): keep listening
+            except (OSError, ValueError):
+                return  # socket closed — the outer loop reconnects
+            if not line:
+                return
+            try:
+                msg = json.loads(line)
+                tq = msg.get("target_q")
+                if tq is None or len(tq) != 5:
+                    continue
+                applied[0] += 1
+                if isinstance(reader, _FollowerDevice):
+                    reader.apply([float(v) for v in tq], float(msg.get("gripper", 0.0)))
+            except Exception:
+                continue
     print(f"teleop source: {source} → {connect} at {hz:.0f} Hz (Ctrl-C to stop)")
     try:
         while True:  # outer reconnect loop
             try:
                 with socket.create_connection((host, int(port)), timeout=5.0) as sock:
                     sock.sendall((json.dumps({"token": token}) + "\n").encode())
-                    reply = json.loads(sock.makefile("rb").readline(4096))
+                    rfile = sock.makefile("rb")
+                    reply = json.loads(rfile.readline(4096))
                     if not reply.get("ok"):
                         raise SystemExit(f"server refused the connection: {reply}")
-                    print("connected — streaming")
+                    print("connected — streaming (full duplex)")
+                    threading.Thread(target=_apply_targets, args=(rfile,),
+                                     daemon=True).start()
                     period = 1.0 / hz
                     while True:
                         q, gripper = reader.read()

@@ -36,6 +36,12 @@ class RunArgs:
     """Disable natural-language control even if ANTHROPIC_API_KEY is set."""
     scenario: str | None = None
     """Scenario YAML (objects/cameras/task): runs the PHYSICS simulation."""
+    link: str | None = None
+    """Link the real arm and the MuJoCo sim: 'to_sim' (実機→Mujoco: sim follows
+    the real arm), 'to_real' (Mujoco→実機: commands drive the sim, shadowed to
+    the real arm), 'both' (双方向). Switchable at runtime from the GUI header.
+    The real side is the serial arm when --backend real, otherwise the remote
+    teleop client (starts the receiver like --teleop; see docs/teleop_remote.md)."""
     record: str | None = None
     """Record demonstrations to this LeRobotDataset repo_id (adds a GUI panel)."""
     record_fps: int = 15
@@ -73,6 +79,7 @@ def _run(args: RunArgs) -> None:
         render_width=args.render_width,
         render_height=args.render_height,
         no_nl=args.no_nl,
+        link=args.link,
         teleop=args.teleop,
         teleop_port=args.teleop_port,
         teleop_token=args.teleop_token or os.environ.get("SO101_TELEOP_TOKEN"),
@@ -155,7 +162,9 @@ class TeleopClientArgs:
     token: str = ""
     """Session token printed by the remote `so101-tool run --teleop` (or SO101_TELEOP_TOKEN)."""
     source: str = "leader"
-    """'leader' = real SO-101 leader arm (lerobot, py>=3.12); 'sine' = hardware-free test."""
+    """'leader' = real SO-101 leader arm; 'follower' = real follower arm (streams its
+    joints up AND applies targets sent back — for --link to_real/both); 'sine' =
+    hardware-free test. leader/follower need lerobot (py>=3.12)."""
     port: str = "/dev/ttyACM0"
     """Serial port of the leader arm."""
     robot_id: str = "so101_leader"

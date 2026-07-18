@@ -13,9 +13,11 @@ Threat model / security posture:
     clamp, limits) and stop within `stale_timeout` when the stream dies;
     the e-stop always wins.
 
-Protocol (client -> server, one JSON object per line):
-    {"token": "<token>"}                          # handshake, replied {"ok": true}
-    {"q": [j1..j5 rad], "gripper": 0..1}          # 10-100 Hz target stream
+Protocol (newline-delimited JSON, full duplex on one socket):
+    client -> server  {"token": "<token>"}                 # handshake -> {"ok": true}
+    client -> server  {"q": [j1..j5 rad], "gripper": 0..1} # measured state, 10-100 Hz
+    server -> client  {"target_q": [...], "gripper": g}    # targets for a local follower
+                                                            # (Mujoco→実機 / 双方向リンク)
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ import time
 import numpy as np
 
 from ..config import ARM_LIMITS_HI, ARM_LIMITS_LO
+from ..robot.base import RobotInterface, RobotState
 
 _MAX_LINE = 4096
 
@@ -49,6 +52,7 @@ class TeleopReceiver:
         self.stale_timeout = stale_timeout
         self._latest: tuple[np.ndarray, float, float] | None = None  # (q, gripper, t)
         self._lock = threading.Lock()
+        self._conn: socket.socket | None = None  # active authenticated connection
         self._server = socket.create_server((bind, port))
         self._server.settimeout(0.5)
         self._run = True
@@ -94,6 +98,9 @@ class TeleopReceiver:
             except Exception:
                 pass
             finally:
+                with self._lock:
+                    if self._conn is conn:
+                        self._conn = None
                 try:
                     conn.close()
                 except OSError:
@@ -113,6 +120,8 @@ class TeleopReceiver:
             self.status = "rejected connection (bad token)"
             return
         conn.sendall(b'{"ok": true}\n')
+        with self._lock:
+            self._conn = conn
         self.status = "leader connected"
         conn.settimeout(2.0)
         while self._run:
@@ -132,8 +141,61 @@ class TeleopReceiver:
             with self._lock:
                 self._latest = (q, float(np.clip(g, 0.0, 1.0)), time.monotonic())
 
+    def send_targets(self, q: np.ndarray, gripper: float) -> bool:
+        """Push a target frame to the connected operator client (full duplex).
+        Returns False when no client is connected. Never raises."""
+        with self._lock:
+            conn = self._conn
+        if conn is None:
+            return False
+        frame = {"target_q": [round(float(v), 5) for v in q],
+                 "gripper": round(float(gripper), 4)}
+        try:
+            conn.sendall((json.dumps(frame) + "\n").encode())
+            return True
+        except OSError:
+            return False
+
     @property
     def fresh(self) -> bool:
         with self._lock:
             latest = self._latest
         return latest is not None and time.monotonic() - latest[2] <= self.stale_timeout
+
+
+class RemoteArmBackend(RobotInterface):
+    """The operator's arm across the SSH tunnel, as a RobotInterface.
+
+    Reads = the client's measured-joint stream; writes = target frames pushed
+    back down the same socket (the client applies them to a local follower).
+    Used as the "real" side of a LinkedBackend for remote 実機↔Mujoco links.
+    """
+
+    def __init__(self, receiver: TeleopReceiver):
+        self.rx = receiver
+        self._last: tuple[np.ndarray, float] | None = None
+
+    def connect(self) -> None:
+        pass  # the receiver accepts the client whenever it dials in
+
+    def disconnect(self) -> None:
+        pass  # receiver lifecycle is owned by the session
+
+    def read_state(self) -> RobotState:
+        result = self.rx.step(None)
+        if result is not None:
+            self._last = result
+        if self._last is None:
+            # nothing received yet: report home so the sim stays put
+            return RobotState(q=np.zeros(5), gripper=0.0, t=time.monotonic(),
+                              connected=False)
+        q, g = self._last
+        return RobotState(q=q.copy(), gripper=g, t=time.monotonic(),
+                          connected=self.rx.fresh)
+
+    def write_targets(self, q, gripper: float) -> None:
+        self.rx.send_targets(q, gripper)
+
+    @property
+    def is_real(self) -> bool:
+        return True

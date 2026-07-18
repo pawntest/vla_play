@@ -106,6 +106,11 @@ laptop$ so101-tool teleop-client --connect localhost:8765 --token <printed> --po
 
 See [docs/teleop_remote.md](docs/teleop_remote.md). Test without hardware: `--source sine`.
 
+`--link {to_sim,to_real,both}` couples the real arm and the MuJoCo sim in either
+or both directions (実機→シム / シム→実機 / 双方向), switchable live from the UI
+header — works with a local serial arm (`--backend real`) or over the same SSH
+tunnel (client runs with `--source follower`).
+
 ## Imitation learning: record → train → deploy
 
 The tool covers the full imitation-learning loop, sim-first and with a free-GPU cloud

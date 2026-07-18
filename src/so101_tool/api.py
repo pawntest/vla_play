@@ -83,6 +83,7 @@ class Session:
     ):
         self.config = config or AppConfig(backend=backend, **config_overrides)
         self.scenario: Scenario | None = None
+        self.teleop_rx = None
         if scenario is not None:
             self.scenario = (
                 scenario if isinstance(scenario, Scenario) else load_scenario(scenario)
@@ -101,6 +102,27 @@ class Session:
             from .robot.sim import SimBackend
 
             self.robot = SimBackend(self.config.joint_map)
+        if self.config.link:
+            # couple the sim above with a real arm (serial or remote teleop)
+            from .robot.linked import LinkedBackend
+
+            sim_side = self.robot
+            if self.config.backend == "real" and scenario is not None:
+                from .robot.lerobot_backend import LeRobotBackend
+
+                real_side = LeRobotBackend(self.config)
+            elif self.config.backend == "real":
+                real_side = self.robot  # already the serial backend
+                from .robot.sim import SimBackend
+
+                sim_side = SimBackend(self.config.joint_map)
+            else:
+                from .teleop.receiver import RemoteArmBackend, TeleopReceiver
+
+                self.teleop_rx = TeleopReceiver(port=self.config.teleop_port,
+                                                token=self.config.teleop_token)
+                real_side = RemoteArmBackend(self.teleop_rx)
+            self.robot = LinkedBackend(sim_side, real_side, link=self.config.link)
         self.kinematics = Kinematics()
         self.loop = ControlLoop(self.robot, Kinematics(), self.config)
         self._policy_runner = None
@@ -119,6 +141,8 @@ class Session:
         self.loop.stop()
         self.loop.join(timeout=2.0)
         self.robot.disconnect()
+        if self.teleop_rx is not None:
+            self.teleop_rx.close()
 
     def __enter__(self) -> "Session":
         return self
