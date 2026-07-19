@@ -144,7 +144,12 @@ def _run(args: RunArgs) -> None:
     except Exception as exc:
         server.stop()
         raise SystemExit(f"startup failed — {type(exc).__name__}: {exc}") from exc
+
+    from .viz.overlay_server import CameraOverlayServer
+
+    app.cam_overlay = CameraOverlayServer(viser_port=config.viser_port)
     print()
+    print(f"  ▶ メインUI(カメラオーバーレイ付き): http://localhost:{app.cam_overlay.port}")
     print(f"  ▶ 3D preview: http://localhost:{config.viser_port}")
     if app.teleop_rx is not None:
         rx = app.teleop_rx

@@ -54,6 +54,7 @@ class App:
         self.train_status = "idle"
         self._train_proc: subprocess.Popen | None = None
         self._busy = threading.Lock()  # one heavy worker at a time
+        self.cam_overlay = None  # CameraOverlayServer, attached by the CLI
         self.teleop_rx = None
         if config.teleop:
             from .teleop.receiver import TeleopReceiver
@@ -100,6 +101,7 @@ class App:
         app.train_status = "idle"
         app._train_proc = None
         app._busy = threading.Lock()
+        app.cam_overlay = None
         app.teleop_rx = None
         if session.config.teleop:
             from .teleop.receiver import TeleopReceiver
@@ -203,6 +205,8 @@ class App:
 
     def shutdown(self) -> None:
         self.stop_training()
+        if self.cam_overlay is not None:
+            self.cam_overlay.close()
         if self.teleop_rx is not None:
             self.teleop_rx.close()
         self._teardown()

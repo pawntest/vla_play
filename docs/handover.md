@@ -62,6 +62,7 @@ viser UI (app.py render loop 30Hz) ◀──────────────
 | `viz/robot_view.py` | mjModel→viser メッシュ。カメラフラスタム描画。**mesh_face はメッシュローカル添字**(vertadr を引くと壊れる、既修正) |
 | `viz/panel.py` | サイドバー全部(状態バナー・タブ・モード自動切替・カメラ表示モード・実機エラーヒント) |
 | `viz/direct_drag.py` | 3Dメッシュ直接ドラッグ(物体移動・アーム誘導) |
+| `viz/overlay_server.py` | メインUI: viser を iframe 埋め込み+カメラ縦列オーバーレイのラッパーページ(viser_port+1。viser は画面固定DOMを持てないための構成) |
 | `nl/agent.py` | Claude tool-use → 動作プリミティブ(ANTHROPIC_API_KEY 時のみ) |
 | `policy/runner.py` | lerobot ポリシー推論。**正式パイプライン必須**: build_dataset_frame → prepare_observation_for_inference → preprocess → select_action → postprocess → make_robot_action |
 | `data/recorder.py`, `demo/` | LeRobotDataset 録画・スクリプトデモ生成(FakeClock で決定論、finalize() 必須) |

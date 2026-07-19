@@ -180,19 +180,28 @@ def test_real_error_hint_covers_common_failures():
     assert _real_error_hint("some novel failure") == ""
 
 
-def test_wipe_mosaic_tiles_frames():
-    from so101_tool.viz.panel import _wipe_mosaic
+def test_camera_overlay_server_serves_page_and_frames():
+    from urllib.request import urlopen
 
-    assert _wipe_mosaic({}) is None
-    frames = {
-        "front": np.zeros((240, 320, 3), dtype=np.uint8),
-        "top": np.full((240, 320, 3), 200, dtype=np.uint8),
-        "wrist": np.full((120, 160, 3), 90, dtype=np.uint8),
-    }
-    mosaic = _wipe_mosaic(frames, tile_h=120, cols=2)
-    assert mosaic is not None and mosaic.ndim == 3 and mosaic.dtype == np.uint8
-    # 3 tiles in 2 columns -> 2 rows; each tile downsampled to ~120 px height
-    assert mosaic.shape[0] >= 2 * 118 and mosaic.shape[1] >= 2 * 158
+    from so101_tool.viz.overlay_server import CameraOverlayServer
+
+    srv = CameraOverlayServer(viser_port=8080, port=0, bind="127.0.0.1")
+    try:
+        base = f"http://127.0.0.1:{srv.port}"
+        page = urlopen(f"{base}/", timeout=5).read().decode()
+        assert "iframe" in page and "8080" in page  # wrapper embeds viser
+        assert json.loads(urlopen(f"{base}/cams", timeout=5).read()) == []
+
+        srv.set_frames({"front": np.zeros((60, 80, 3), dtype=np.uint8),
+                        "top": np.full((60, 80, 3), 128, dtype=np.uint8)})
+        assert json.loads(urlopen(f"{base}/cams", timeout=5).read()) == ["front", "top"]
+        jpeg = urlopen(f"{base}/cam/front", timeout=5).read()
+        assert jpeg[:2] == b"\xff\xd8"  # JPEG magic
+
+        srv.enabled = False  # 📷 toggle / mode off hides all tiles
+        assert json.loads(urlopen(f"{base}/cams", timeout=5).read()) == []
+    finally:
+        srv.close()
 
 
 def test_placeholder_real_state_does_not_drag_sim_home():

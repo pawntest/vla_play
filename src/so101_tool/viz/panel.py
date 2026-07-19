@@ -81,34 +81,6 @@ def _real_error_hint(msg: str) -> str:
     return ""
 
 
-def _wipe_mosaic(frames: dict, tile_h: int = 150, cols: int = 2):
-    """Tile camera frames into one image for the always-visible wipe strip."""
-    if not frames:
-        return None
-    tiles = []
-    for name in sorted(frames):
-        img = frames[name]
-        if img.ndim != 3:
-            continue
-        step = max(1, round(img.shape[0] / tile_h))
-        tiles.append(np.ascontiguousarray(img[::step, ::step]))
-    if not tiles:
-        return None
-    h = max(t.shape[0] for t in tiles)
-    w = max(t.shape[1] for t in tiles)
-
-    def pad(t):
-        return np.pad(t, ((0, h - t.shape[0]), (0, w - t.shape[1]), (0, 0)),
-                      constant_values=28)
-
-    blank = np.full((h, w, tiles[0].shape[2]), 28, dtype=tiles[0].dtype)
-    rows = []
-    for i in range(0, len(tiles), cols):
-        row = [pad(t) for t in tiles[i : i + cols]]
-        if len(tiles) > cols:
-            row += [blank] * (cols - len(row))
-        rows.append(np.hstack(row))
-    return np.vstack(rows)
 
 
 def _find_scenarios() -> list[str]:
@@ -176,27 +148,18 @@ class ControlPanel:
             mirror_btn = gui.add_button("🪞 ミラーモード(実機を手で動かす)")
             mirror_btn.on_click(lambda _: self._put(SetMode(mode=Mode.MIRROR)))
 
-        # Camera overlay: every camera tiled into one image pinned to the top-
-        # left of the 3D viewport (the default camera view mode — 📷 tab).
-        # viser has no screen-space layer, so the plane chases the viewer's
-        # camera every render tick (_update_overlay_pose).
-        self._overlay = None
-        self._overlay_size = (0.06, 0.08)  # (h, w) meters, w set from mosaic
+        # Camera overlay: a Zoom/Teams-style fixed DOM column served by the
+        # wrapper page (viz/overlay_server.py) — this panel just feeds it the
+        # latest frames from the render loop (~2 Hz).
         self._initial_frames = {}
         if hasattr(app.backend, "get_camera_frames"):
             try:
                 self._initial_frames = app.backend.get_camera_frames()
             except Exception:
                 self._initial_frames = {}
-            mosaic = _wipe_mosaic(self._initial_frames)
-            if mosaic is not None:
-                h = 0.06
-                w = h * mosaic.shape[1] / mosaic.shape[0]
-                self._overlay_size = (h, w)
-                self._overlay = server.scene.add_image(
-                    "/overlay/cameras", mosaic, render_width=w, render_height=h,
-                    cast_shadow=False, receive_shadow=False,
-                )
+            overlay = getattr(app, "cam_overlay", None)
+            if overlay is not None and self._initial_frames:
+                overlay.set_frames(self._initial_frames)
 
         # =============================  tabs  ================================
         # (handles kept for cleanup_gui: viser's gui.reset() crashes on tab
@@ -533,7 +496,8 @@ class ControlPanel:
             return
         self._cam_mode_dd = gui.add_dropdown(
             "表示モード", options=_CAM_MODES, initial_value=_CAM_MODES[0],
-            hint="オーバーレイ = 全カメラを3D画面の左上に常時表示 / "
+            hint="オーバーレイ = 画面左に全カメラを縦一列で常時表示"
+                 "(オーバーレイ付きURLで開いたとき) / "
                  "3D画角 = フラスタム内に映像を表示 / オフ = 更新停止(軽量)",
         )
         self._cam_mode_dd.on_update(lambda _: self._apply_cam_mode())
@@ -599,48 +563,11 @@ class ControlPanel:
 
     def _apply_cam_mode(self) -> None:
         mode = self._cam_mode_dd.value
-        if self._overlay is not None:
-            self._overlay.visible = mode == _CAM_MODES[0]
+        overlay = getattr(self._app, "cam_overlay", None)
+        if overlay is not None:
+            overlay.enabled = mode == _CAM_MODES[0]
         if mode != _CAM_MODES[1] and self._app.view is not None:
             self._app.view.clear_camera_images()
-
-    def _update_overlay_pose(self) -> None:
-        """Pin the camera overlay to the top-left of the viewer's screen by
-        chasing the (first) client camera each render tick."""
-        if self._overlay is None or self._cam_mode_dd is None:
-            return
-        if self._cam_mode_dd.value != _CAM_MODES[0]:
-            return
-        clients = self._server.get_clients()
-        if not clients:
-            return
-        cam = next(iter(clients.values())).camera
-        try:
-            fov = float(cam.fov)
-            aspect = float(cam.aspect) or 4 / 3
-            cpos = np.asarray(cam.position, dtype=float)
-            cw = np.asarray(cam.wxyz, dtype=float)
-        except Exception:
-            return
-        if not (0.05 < fov < 3.0):
-            return
-        import mujoco
-
-        mat = np.empty(9)
-        mujoco.mju_quat2Mat(mat, cw)
-        rot = mat.reshape(3, 3)
-        right, down, forward = rot[:, 0], rot[:, 1], rot[:, 2]
-        h, w = self._overlay_size
-        frac = 0.30  # overlay height as a fraction of the view height
-        dist = h / (frac * 2.0 * np.tan(fov / 2.0))
-        half_h = dist * np.tan(fov / 2.0)
-        half_w = half_h * aspect
-        margin = 0.15 * h
-        pos = (cpos + forward * dist
-               - down * (half_h - h / 2.0 - margin)      # up to the top edge
-               - right * (half_w - w / 2.0 - margin))    # left to the left edge
-        self._overlay.position = pos
-        self._overlay.wxyz = cw
 
     # ------------------------------------------------------------- lifecycle --
 
@@ -659,12 +586,6 @@ class ControlPanel:
 
     def cleanup_scene(self) -> None:
         """Remove scene nodes owned by this panel (called before a rebuild)."""
-        if self._overlay is not None:
-            try:
-                self._overlay.remove()
-            except Exception:
-                pass
-            self._overlay = None
         for g in self._drag_gizmos:
             try:
                 g.remove()
@@ -898,7 +819,6 @@ class ControlPanel:
 
     def update(self, snap: LoopSnapshot | None) -> None:
         self._tick += 1
-        self._update_overlay_pose()  # every tick: the overlay chases the viewer
         if snap is None or self._tick % 6:  # ~5 Hz updates at 30 Hz render
             return
         app = self._app
@@ -954,10 +874,9 @@ class ControlPanel:
                     if handle is not None:
                         handle.image = img
                 mode = self._cam_mode_dd.value
-                if mode == _CAM_MODES[0] and self._overlay is not None:
-                    mosaic = _wipe_mosaic(frames)
-                    if mosaic is not None:
-                        self._overlay.image = mosaic
+                overlay = getattr(app, "cam_overlay", None)
+                if mode == _CAM_MODES[0] and overlay is not None:
+                    overlay.set_frames(frames)
                 elif (mode == _CAM_MODES[1] and app.view is not None
                         and self._cam_frustum_cb.value):
                     app.view.set_camera_images(frames)
