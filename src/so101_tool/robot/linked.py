@@ -110,6 +110,22 @@ class LinkedBackend(RobotInterface):
             self._real_ok = True
         self.real_status = "connected"
 
+    def reconnect_real(self) -> None:
+        """Retry the real-side connection (e.g. after plugging in the motor
+        power supply or fixing the port) without restarting the app."""
+        if self.real_status == "connecting":
+            return  # already dialing
+        with self._lock:
+            self._real_ok = False
+            self._real_live = False
+        try:
+            self.real.disconnect()
+        except Exception:
+            pass
+        self.real_status = "connecting"
+        threading.Thread(target=self._connect_real, daemon=True,
+                         name="so101-link-reconnect").start()
+
     def disconnect(self) -> None:
         with self._lock:
             self._real_ok = False

@@ -210,6 +210,14 @@ class RobotView:
             if img is not None:
                 frustum.image = img
 
+    def clear_camera_images(self) -> None:
+        """Drop the live images from the frustums (wipe/off view modes)."""
+        for _cid, _name, frustum in self._cams:
+            try:
+                frustum.image = None
+            except Exception:
+                pass  # older viser: keep the last image rather than crash
+
     def set_cameras_visible(self, visible: bool) -> None:
         for _cid, _name, frustum in self._cams:
             frustum.visible = visible

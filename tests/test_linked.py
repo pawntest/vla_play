@@ -139,6 +139,62 @@ def test_real_connect_failure_keeps_sim_alive():
     assert np.allclose(state.q, Q, atol=1e-6)
 
 
+def test_reconnect_real_recovers_after_failure():
+    """Fix the power/port, press reconnect — no app restart needed."""
+
+    class FlakyReal(SimBackend):
+        attempts = 0
+
+        def connect(self):
+            FlakyReal.attempts += 1
+            if FlakyReal.attempts == 1:
+                raise RuntimeError("motor check failed: found {}")
+            super().connect()
+
+    clock = Clock()
+    jm = JointMap(vmax_rad_s=np.full(5, 1000.0))
+    linked = LinkedBackend(SimBackend(jm, clock=clock), FlakyReal(jm, clock=clock),
+                           link="both")
+    linked.connect()
+    assert not linked.wait_real(5.0)
+    assert "motor check failed" in linked.real_status
+    linked.reconnect_real()  # user fixed the hardware and pressed the button
+    assert linked.wait_real(5.0), linked.real_status
+    linked.read_state()
+    linked.write_targets(Q, 0.5)
+    clock.t += 0.05
+    for _ in range(2):
+        state = linked.read_state()
+        clock.t += 0.05
+    assert np.allclose(state.q, Q, atol=1e-6)
+
+
+def test_real_error_hint_covers_common_failures():
+    from so101_tool.viz.panel import _real_error_hint
+
+    motor_err = ("FeetechMotorsBus motor check failed on port '/dev/ttyACM0': "
+                 "Missing motor IDs ... Full found motor list (id: model_number): {}")
+    assert "電源" in _real_error_hint(motor_err)
+    assert "権限" in _real_error_hint("Permission denied: '/dev/ttyACM0'")
+    assert "--port" in _real_error_hint("[Errno 2] No such file or directory")
+    assert _real_error_hint("some novel failure") == ""
+
+
+def test_wipe_mosaic_tiles_frames():
+    from so101_tool.viz.panel import _wipe_mosaic
+
+    assert _wipe_mosaic({}) is None
+    frames = {
+        "front": np.zeros((240, 320, 3), dtype=np.uint8),
+        "top": np.full((240, 320, 3), 200, dtype=np.uint8),
+        "wrist": np.full((120, 160, 3), 90, dtype=np.uint8),
+    }
+    mosaic = _wipe_mosaic(frames, tile_h=120, cols=2)
+    assert mosaic is not None and mosaic.ndim == 3 and mosaic.dtype == np.uint8
+    # 3 tiles in 2 columns -> 2 rows; each tile downsampled to ~120 px height
+    assert mosaic.shape[0] >= 2 * 118 and mosaic.shape[1] >= 2 * 158
+
+
 def test_placeholder_real_state_does_not_drag_sim_home():
     """A remote arm reports connected=False until its stream starts; the sim
     must stay the source (not get pulled to the placeholder home pose)."""

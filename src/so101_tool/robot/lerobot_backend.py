@@ -47,7 +47,16 @@ class LeRobotBackend(RobotInterface):
             disable_torque_on_disconnect=True,
         )
         self._robot = SO101Follower(cfg)
-        self._robot.connect()
+        try:
+            self._robot.connect()
+        except Exception:
+            # leave a clean slate so a later reconnect attempt starts fresh
+            robot, self._robot = self._robot, None
+            try:
+                robot.disconnect()
+            except Exception:
+                pass
+            raise
 
         obs = self._robot.get_observation()
         arm_deg = np.array([obs[f"{j}.pos"] for j in ARM_JOINTS], dtype=float)

@@ -60,6 +60,56 @@ _LINK_LABELS = {
 }
 _LINK_SHORT = {"to_sim": "実機→シム", "to_real": "シム→実機", "both": "実機↔シム"}
 
+# camera display modes (📷 tab): wipe strip (default) / images in 3D frustums / off
+_CAM_MODES = ("ワイプ表示(既定)", "3D画角に映す", "オフ")
+
+
+def _real_error_hint(msg: str) -> str:
+    """Actionable Japanese hint for common real-arm connection failures."""
+    m = msg.lower()
+    if "missing motor" in m or "motor check failed" in m or "found motor list" in m:
+        return ("モーターが1台も応答していません。① アーム本体の電源アダプタが"
+                "入っているか(USBだけではモーターは動きません) ② --port が"
+                "フォロワー機のポートか(リーダー機と取り違えやすい) "
+                "③ モーター間ケーブルの差し込み を確認して「実機に再接続」")
+    if "permission" in m:
+        return "ポート権限不足: sudo usermod -aG dialout $USER 後に再ログイン"
+    if "no such file" in m or "errno 2" in m or "could not open" in m:
+        return "ポートが見つかりません: ls /dev/ttyACM* で確認して --port を修正"
+    if "calibrat" in m:
+        return "未キャリブレーションの可能性: lerobot-calibrate を実行(docs/hardware.md)"
+    return ""
+
+
+def _wipe_mosaic(frames: dict, tile_h: int = 150, cols: int = 2):
+    """Tile camera frames into one image for the always-visible wipe strip."""
+    if not frames:
+        return None
+    tiles = []
+    for name in sorted(frames):
+        img = frames[name]
+        if img.ndim != 3:
+            continue
+        step = max(1, round(img.shape[0] / tile_h))
+        tiles.append(np.ascontiguousarray(img[::step, ::step]))
+    if not tiles:
+        return None
+    h = max(t.shape[0] for t in tiles)
+    w = max(t.shape[1] for t in tiles)
+
+    def pad(t):
+        return np.pad(t, ((0, h - t.shape[0]), (0, w - t.shape[1]), (0, 0)),
+                      constant_values=28)
+
+    blank = np.full((h, w, tiles[0].shape[2]), 28, dtype=tiles[0].dtype)
+    rows = []
+    for i in range(0, len(tiles), cols):
+        row = [pad(t) for t in tiles[i : i + cols]]
+        if len(tiles) > cols:
+            row += [blank] * (cols - len(row))
+        rows.append(np.hstack(row))
+    return np.vstack(rows)
+
 
 def _find_scenarios() -> list[str]:
     found = []
@@ -112,15 +162,34 @@ class ControlPanel:
         from ..robot.linked import LinkedBackend
 
         self._link_dd = None
+        self._reconnect_btn = None
         if isinstance(app.backend, LinkedBackend):
             self._link_dd = gui.add_dropdown(
                 "🔗 リンク方向", options=tuple(_LINK_LABELS.values()),
                 initial_value=_LINK_LABELS[app.backend.link],
             )
             self._link_dd.on_update(lambda _: self._set_link())
+            self._reconnect_btn = gui.add_button("🔌 実機に再接続", color="orange",
+                                                 visible=False)
+            self._reconnect_btn.on_click(lambda _: app.backend.reconnect_real())
         elif app.backend is not None and app.backend.is_real:
             mirror_btn = gui.add_button("🪞 ミラーモード(実機を手で動かす)")
             mirror_btn.on_click(lambda _: self._put(SetMode(mode=Mode.MIRROR)))
+
+        # Wipe strip: every camera tiled into one always-visible image right
+        # in the header (the default camera view mode — see the 📷 tab).
+        self._wipe_img = None
+        self._initial_frames = {}
+        if hasattr(app.backend, "get_camera_frames"):
+            try:
+                self._initial_frames = app.backend.get_camera_frames()
+            except Exception:
+                self._initial_frames = {}
+            mosaic = _wipe_mosaic(self._initial_frames)
+            if mosaic is not None:
+                self._wipe_img = gui.add_image(
+                    mosaic, label="📷 " + " / ".join(sorted(self._initial_frames))
+                )
 
         # =============================  tabs  ================================
         # (handles kept for cleanup_gui: viser's gui.reset() crashes on tab
@@ -149,7 +218,7 @@ class ControlPanel:
             self._build_scene_tab(gui, app, scenario)
 
         self._cam_images = {}
-        self._cam_preview_cb = None
+        self._cam_mode_dd = None
         self._cam_tick = 0
         if hasattr(app.backend, "get_camera_frames"):
             tab = self._tab_group.add_tab("📷 カメラ")
@@ -444,24 +513,23 @@ class ControlPanel:
         save_btn.on_click(lambda _: self._save_scenario())
 
     def _build_camera_tab(self, gui, app) -> None:
-        """Live per-camera previews + 3D frustum toggle (📷 tab)."""
-        try:
-            frames = app.backend.get_camera_frames()
-        except Exception:
-            frames = {}
+        """Camera view-mode selector + live per-camera previews (📷 tab)."""
+        frames = self._initial_frames
         if not frames:
             gui.add_markdown(
                 "*このシーンにカメラがありません。「🌍 シーン」タブの"
                 "カメラ編集から追加できます*"
             )
             return
-        self._cam_preview_cb = gui.add_checkbox(
-            "🎥 リアルタイムプレビュー", initial_value=True,
-            hint="全カメラを約2Hzで描画します(動作が重いときはオフに)",
+        self._cam_mode_dd = gui.add_dropdown(
+            "表示モード", options=_CAM_MODES, initial_value=_CAM_MODES[0],
+            hint="ワイプ = 全カメラをヘッダーに並べて常時表示 / "
+                 "3D画角 = フラスタム内に映像を表示 / オフ = 更新停止(軽量)",
         )
+        self._cam_mode_dd.on_update(lambda _: self._apply_cam_mode())
         self._cam_frustum_cb = gui.add_checkbox(
-            "📐 3D空間に画角を表示", initial_value=True,
-            hint="各カメラの位置と視野をフラスタムで描画します",
+            "📐 3D空間に画角(フラスタム)を表示", initial_value=True,
+            hint="各カメラの位置と視野の枠を描画します",
         )
         self._cam_frustum_cb.on_update(
             lambda _: self._app.view.set_cameras_visible(self._cam_frustum_cb.value)
@@ -470,6 +538,13 @@ class ControlPanel:
             self._cam_images[name] = gui.add_image(
                 img, label=f"{name} ({img.shape[1]}×{img.shape[0]})"
             )
+
+    def _apply_cam_mode(self) -> None:
+        mode = self._cam_mode_dd.value
+        if self._wipe_img is not None:
+            self._wipe_img.visible = mode == _CAM_MODES[0]
+        if mode != _CAM_MODES[1] and self._app.view is not None:
+            self._app.view.clear_camera_images()
 
     # ------------------------------------------------------------- lifecycle --
 
@@ -696,6 +771,9 @@ class ControlPanel:
                 jp = {"connecting": "接続中…(初回はlerobot読込で数十秒かかります)",
                       "disconnected": "未接続"}.get(rs, rs)
                 info += f"\n⚠ 実機側: {jp} — シム単体で動作継続中"
+                hint = _real_error_hint(rs)
+                if hint:
+                    info += f"\n💡 {hint}"
             elif app.backend.link != "to_real" and not app.backend.real_live:
                 info += "\n⚠ 実機側: ストリーム待ち(teleop-client の接続を確認)"
         badge = "🔴 REC" if (app.recorder is not None and app.recorder.recording) else ""
@@ -727,6 +805,10 @@ class ControlPanel:
             self._banner_html.content = html
         if self._reset_estop_btn.visible != snap.estop:
             self._reset_estop_btn.visible = snap.estop
+        if self._reconnect_btn is not None:
+            show = app.backend.real_status.startswith("error")
+            if self._reconnect_btn.visible != show:
+                self._reconnect_btn.visible = show
 
         if self._teleop_md is not None and app.teleop_rx is not None:
             rx = app.teleop_rx
@@ -756,8 +838,8 @@ class ControlPanel:
             self._gripper_slider.value = float(snap.gripper)
 
         # camera previews (~2 Hz: update() runs at ~5 Hz, every 3rd pass)
-        if (self._cam_images and self._cam_preview_cb is not None
-                and self._cam_preview_cb.value):
+        if (self._cam_images and self._cam_mode_dd is not None
+                and self._cam_mode_dd.value != _CAM_MODES[2]):
             self._cam_tick += 1
             if self._cam_tick % 3 == 0:
                 try:
@@ -768,5 +850,11 @@ class ControlPanel:
                     handle = self._cam_images.get(name)
                     if handle is not None:
                         handle.image = img
-                if app.view is not None and self._cam_frustum_cb.value:
+                mode = self._cam_mode_dd.value
+                if mode == _CAM_MODES[0] and self._wipe_img is not None:
+                    mosaic = _wipe_mosaic(frames)
+                    if mosaic is not None:
+                        self._wipe_img.image = mosaic
+                elif (mode == _CAM_MODES[1] and app.view is not None
+                        and self._cam_frustum_cb.value):
                     app.view.set_camera_images(frames)
