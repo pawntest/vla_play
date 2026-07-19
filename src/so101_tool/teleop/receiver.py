@@ -23,15 +23,19 @@ Protocol (newline-delimited JSON, full duplex on one socket):
 from __future__ import annotations
 
 import json
+import logging
 import secrets
 import socket
 import threading
 import time
 
+
 import numpy as np
 
 from ..config import ARM_LIMITS_HI, ARM_LIMITS_LO
 from ..robot.base import RobotInterface, RobotState
+
+_log = logging.getLogger("so101_tool.teleop")
 
 _MAX_LINE = 4096
 
@@ -105,6 +109,8 @@ class TeleopReceiver:
                     conn.close()
                 except OSError:
                     pass
+                if self.status == "leader connected":
+                    _log.info("teleop: client disconnected")
                 self.status = "waiting for connection"
 
     def _handle(self, conn: socket.socket) -> None:
@@ -118,11 +124,13 @@ class TeleopReceiver:
         if not secrets.compare_digest(str(handshake.get("token", "")), self.token):
             conn.sendall(b'{"ok": false, "error": "bad token"}\n')
             self.status = "rejected connection (bad token)"
+            _log.warning("teleop: rejected client (bad token)")
             return
         conn.sendall(b'{"ok": true}\n')
         with self._lock:
             self._conn = conn
         self.status = "leader connected"
+        _log.info("teleop: client connected ✅")
         conn.settimeout(2.0)
         while self._run:
             line = reader.readline(_MAX_LINE)

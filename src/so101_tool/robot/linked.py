@@ -27,6 +27,7 @@ reports why, so the UI keeps running and shows what's wrong instead of dying.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -35,6 +36,7 @@ import numpy as np
 from .base import RobotInterface, RobotState
 
 LINK_MODES = ("to_sim", "to_real", "both")
+_log = logging.getLogger("so101_tool.link")
 
 
 class LinkedBackend(RobotInterface):
@@ -91,6 +93,7 @@ class LinkedBackend(RobotInterface):
         with self._lock:
             self._real_ok = False
         self.real_status = f"error: {exc}"
+        _log.error("real side down: %s", exc)
 
     # -- RobotInterface -----------------------------------------------------
 
@@ -101,6 +104,7 @@ class LinkedBackend(RobotInterface):
                          name="so101-link-connect").start()
 
     def _connect_real(self) -> None:
+        _log.info("real side: connecting (%s)…", type(self.real).__name__)
         try:
             self.real.connect()
         except Exception as exc:
@@ -109,6 +113,7 @@ class LinkedBackend(RobotInterface):
         with self._lock:
             self._real_ok = True
         self.real_status = "connected"
+        _log.info("real side: connected ✅ (link=%s)", self._link)
 
     def reconnect_real(self) -> None:
         """Retry the real-side connection (e.g. after plugging in the motor
@@ -122,6 +127,7 @@ class LinkedBackend(RobotInterface):
             self.real.disconnect()
         except Exception:
             pass
+        _log.info("real side: reconnect requested")
         self.real_status = "connecting"
         threading.Thread(target=self._connect_real, daemon=True,
                          name="so101-link-reconnect").start()

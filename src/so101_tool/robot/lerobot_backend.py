@@ -8,12 +8,16 @@ units (radians / 0..1 fraction) happen here and nowhere else.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
 
+
 from ..config import ARM_JOINTS, AppConfig
 from .base import RobotInterface, RobotState
+
+_log = logging.getLogger("so101_tool.real")
 
 _INSTALL_HINT = (
     "lerobot is not installed. Install the real-robot extra with:\n"
@@ -46,6 +50,7 @@ class LeRobotBackend(RobotInterface):
             cameras=self._config.cameras,
             disable_torque_on_disconnect=True,
         )
+        _log.info("opening %s (id=%s)…", self._config.port, self._config.robot_id)
         self._robot = SO101Follower(cfg)
         try:
             self._robot.connect()
@@ -73,6 +78,7 @@ class LeRobotBackend(RobotInterface):
                 ">= 0.5.1 is installed and the robot is calibrated (use_degrees=True)."
             )
         self.last_observation = obs
+        _log.info("connected — joints(deg): %s", np.round(arm_deg, 1))
 
     def disconnect(self) -> None:
         if self._robot is not None:

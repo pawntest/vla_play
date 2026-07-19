@@ -1,15 +1,48 @@
-"""Command-line entry point: `so101-tool run` / `so101-tool ik-check`."""
+"""Command-line entry point: `so101-tool run` / `so101-tool doctor` / …"""
 
 from __future__ import annotations
 
 import dataclasses
+import glob
+import logging
 import os
+import threading
 import time
 
 import numpy as np
 import tyro
 
 from .config import ARM_LIMITS_HI, ARM_LIMITS_LO, AppConfig
+
+_log = logging.getLogger("so101_tool")
+
+
+def _setup_logging(log_file: str | None = None) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=handlers,
+    )
+
+
+def _watch_port(port: str) -> None:
+    """Console heartbeat: report the serial port appearing/disappearing live."""
+    last: bool | None = None
+    while True:
+        present = os.path.exists(port)
+        if present != last:
+            if present:
+                _log.info("port %s: 検出 ✅", port)
+            else:
+                _log.warning("port %s: 未検出 ❌ — USBケーブル/電源を確認 "
+                             "(候補: %s)", port,
+                             glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*") or "なし")
+            last = present
+        time.sleep(2.0)
 
 
 @dataclasses.dataclass
@@ -60,12 +93,19 @@ class RunArgs:
     teleop_token: str | None = None
     """Teleop session token (default: random, printed at startup).
     Can also be set via SO101_TELEOP_TOKEN."""
+    log_file: str | None = None
+    """Also write logs (link/connection events) to this file."""
 
 
 def _run(args: RunArgs) -> None:
     import viser
 
     from .app import App, run_app
+
+    _setup_logging(args.log_file)
+    if args.backend == "real":
+        threading.Thread(target=_watch_port, args=(args.port,), daemon=True,
+                         name="so101-port-watch").start()
 
     config = AppConfig(
         backend=args.backend,
@@ -195,6 +235,91 @@ def _teleop_client(args: TeleopClientArgs) -> None:
 
 
 @dataclasses.dataclass
+class DoctorArgs:
+    """Real-arm connection self-test: port -> permission -> lerobot -> motors -> calibration."""
+
+    port: str = "/dev/ttyACM0"
+    """Serial port of the follower arm."""
+    robot_id: str = "so101_follower"
+    """lerobot calibration id."""
+
+
+def _doctor(args: DoctorArgs) -> None:
+    ok = True
+
+    def step(passed: bool, label: str, hint: str = "") -> bool:
+        nonlocal ok
+        print(f"  {'✅' if passed else '❌'} {label}")
+        if not passed:
+            ok = False
+            if hint:
+                print(f"     💡 {hint}")
+        return passed
+
+    print(f"so101-tool doctor — {args.port} (robot_id={args.robot_id})\n")
+
+    candidates = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
+    print(f"  シリアルポート候補: {candidates or 'なし'}")
+    if not step(os.path.exists(args.port), f"ポート {args.port} が存在する",
+                "USBケーブルを確認。候補が2つある場合は抜き差しで特定 "
+                "(リーダー機と取り違えていないか)"):
+        print("\n判定: ポートが見えるまで先に進めません")
+        return
+
+    try:
+        fd = os.open(args.port, os.O_RDWR | os.O_NONBLOCK)
+        os.close(fd)
+        step(True, "ポートを開ける(権限OK)")
+    except PermissionError:
+        step(False, "ポートを開ける(権限OK)",
+             "sudo usermod -aG dialout $USER 後に再ログイン")
+    except OSError as exc:
+        step(False, f"ポートを開ける ({exc})", "他プロセスが使用中でないか確認")
+
+    try:
+        from lerobot.motors.feetech import FeetechMotorsBus  # noqa: F401
+
+        step(True, "lerobot + feetech-servo-sdk がインストール済み")
+    except ImportError as exc:
+        step(False, "lerobot + feetech-servo-sdk がインストール済み",
+             f'pip install "so101-tool[real]" (Python >= 3.12) — {exc}')
+        print("\n判定: 依存を入れてから再実行してください")
+        return
+
+    found: dict = {}
+    try:
+        bus = FeetechMotorsBus(port=args.port, motors={})
+        try:
+            bus.connect(handshake=False)
+        except TypeError:
+            bus.connect()
+        found = bus.broadcast_ping() or {}
+        bus.disconnect()
+        step(len(found) >= 6, f"モーター応答: {sorted(found)} (期待: 1〜6)",
+             "モーターが応答しません。① アーム本体の電源アダプタ(USB給電だけでは"
+             "動きません) ② モーター間ケーブル ③ 別プロセスの占有 を確認")
+    except Exception as exc:
+        step(False, f"モータースキャン ({exc})",
+             "電源・ケーブル・ポート占有を確認して再実行")
+
+    from pathlib import Path
+
+    cal_dir = Path(os.environ.get(
+        "HF_LEROBOT_CALIBRATION",
+        Path.home() / ".cache" / "huggingface" / "lerobot" / "calibration",
+    ))
+    hits = list(cal_dir.rglob(f"{args.robot_id}.json"))
+    step(bool(hits), f"キャリブレーション {args.robot_id}.json ({hits[0] if hits else cal_dir})",
+         f"lerobot-calibrate --robot.type=so101_follower --robot.port={args.port} "
+         f"--robot.id={args.robot_id} を実行(docs/hardware.md)")
+
+    if ok:
+        print("\n判定: ✅ すべて正常 — so101-tool run --backend real --link both で接続できます")
+    else:
+        print("\n判定: ❌ 上の❌を直してから再実行してください(直したらUIの「🔌 実機に再接続」でも復旧可)")
+
+
+@dataclasses.dataclass
 class IkCheckArgs:
     """FK→IK round-trip accuracy check (no hardware needed)."""
 
@@ -243,6 +368,7 @@ def main() -> None:
     args = tyro.extras.subcommand_cli_from_dict(
         {
             "run": RunArgs,
+            "doctor": DoctorArgs,
             "teleop-client": TeleopClientArgs,
             "scripted-demos": ScriptedDemosArgs,
             "train": TrainArgs,
@@ -251,6 +377,8 @@ def main() -> None:
     )
     if isinstance(args, RunArgs):
         _run(args)
+    elif isinstance(args, DoctorArgs):
+        _doctor(args)
     elif isinstance(args, TeleopClientArgs):
         _teleop_client(args)
     elif isinstance(args, ScriptedDemosArgs):
