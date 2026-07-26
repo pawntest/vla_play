@@ -1,0 +1,38 @@
+# Everything-in-one example: table, checker floor, props, rigid + cloth objects,
+# world-fixed / arm-attached cameras.  Run:
+#   so101-tool run --scenario examples/tabletop_cloth.yaml
+name: tabletop_cloth
+task: "put the red cube on the blue towel"
+settle_steps: 250
+environment:
+  floor: {rgba: [0.30, 0.34, 0.40, 1.0], checker: true}
+  table: {size: [0.8, 0.6], height: 0.0, thickness: 0.04, pos: [0.18, 0.0],
+          rgba: [0.58, 0.44, 0.32, 1.0]}
+  props:
+    - {name: backdrop, type: box, size: [0.01, 0.4, 0.25], pos: [-0.18, 0.0, 0.25],
+       rgba: [0.85, 0.85, 0.88, 1.0]}
+  light_diffuse: 0.8
+objects:
+  - name: cube
+    type: box
+    size: [0.015, 0.015, 0.015]
+    pos: [0.26, 0.03, 0.02]
+    rgba: [0.9, 0.12, 0.12, 1.0]
+    mass: 0.03
+    pos_noise: [0.03, 0.04, 0.0]
+    yaw_range: [-0.6, 0.6]
+  - name: towel
+    type: cloth
+    size: [0.14, 0.14]
+    pos: [0.22, -0.10, 0.03]
+    rgba: [0.18, 0.35, 0.85, 1.0]
+    mass: 0.04
+    pos_noise: [0.02, 0.02, 0.0]
+    cloth: {resolution: 9, young: 3.0e4, poisson: 0.1, thickness: 0.01, damping: 0.01}
+cameras:
+  - {name: front, pos: [0.55, -0.4, 0.35], lookat: [0.25, 0.0, 0.05], fovy: 50}
+  - {name: side, pos: [0.25, 0.5, 0.3], lookat: [0.25, 0.0, 0.05], fovy: 50}
+  - {name: top, pos: [0.25, 0.0, 0.7], lookat: [0.25, 0.0, 0.0], fovy: 55}
+  - {name: wrist_cam}                     # built into the arm
+  - {name: grip_cam, attach_to: gripper,  # tool-mounted; -z is the jaw axis
+     pos: [0.0, -0.07, 0.01], lookat: [0.02, 0.0, -0.22], fovy: 75}

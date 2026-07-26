@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vla-play"
+version = "0.2.0b1"
+description = "LeRobot SO-101 control tool with VLA-play: live 3D preview (viser), rule-based tool-frame/IK motion, AI control (lerobot policies + natural-language via Claude)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "numpy",
+    "mujoco>=3.2",
+    "mink",
+    "viser>=1.0",
+    "trimesh",
+    "loop-rate-limiters",
+    "tyro",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+# Real SO-101 hardware via lerobot
+real = ["lerobot[feetech]>=0.5.1"]
+# Natural-language control via the Claude API
+nl = ["anthropic>=0.40"]
+# Trained policy inference (ACT / SmolVLA)
+policy = ["lerobot[smolvla]>=0.5.1"]
+# Demonstration recording to LeRobotDataset
+data = ["lerobot[dataset]>=0.5.1"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+so101-tool = "so101_tool.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/so101_tool"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
